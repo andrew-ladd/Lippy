@@ -15,14 +15,18 @@ struct ClipboardItemRow: View {
     @Environment(\.colorScheme) private var colorScheme
     @State private var isPinHovered = false
     @State private var pinBounce = false
+
+    private var isCodeItem: Bool {
+        item.detectedLanguage != nil
+    }
     
     var body: some View {
         mainContent
             .padding(.vertical, 7)
             .padding(.horizontal, 8)
             .modifier(GlassItemModifier(isHovered: isHovered))
-            .scaleEffect(isHovered ? 1.01 : 1.0)
-            .animation(.spring(response: 0.3, dampingFraction: 0.7), value: isHovered)
+            .scaleEffect(isHovered && !isCodeItem ? 1.01 : 1.0)
+            .animation(isCodeItem ? nil : .spring(response: 0.3, dampingFraction: 0.7), value: isHovered)
             .frame(maxWidth: .infinity, alignment: .leading)
             .onDrag {
                 switch item.type {
@@ -232,6 +236,9 @@ struct ClipboardItemRow: View {
                 .fixedSize(horizontal: false, vertical: true)
                 .padding(8)
                 .modifier(GlassCardModifier(cornerRadius: 8))
+                .transaction { transaction in
+                    transaction.animation = nil
+                }
         } else {
             codeTextView(text: item.text ?? "")
         }
@@ -245,6 +252,9 @@ struct ClipboardItemRow: View {
             .fixedSize(horizontal: false, vertical: true)
             .padding(8)
             .modifier(GlassCardModifier(cornerRadius: 8))
+            .transaction { transaction in
+                transaction.animation = nil
+            }
     }
     
     @ViewBuilder

@@ -1311,11 +1311,11 @@ struct ClipboardView: View {
         }
         
         // Only allow expansion when NOT scrolling
-        if isHovered && !isScrolling {
+        if isHovered && !isScrolling && item.detectedLanguage == nil {
             // Small delay before expanding to avoid flicker
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
                 // Check we're still hovering the same item and still not scrolling
-                if hoveredItemId == item.id && !isScrolling {
+                if hoveredItemId == item.id && !isScrolling && item.detectedLanguage == nil {
                     withAnimation(.easeOut(duration: 0.2)) {
                         expandableItemId = item.id
                     }
