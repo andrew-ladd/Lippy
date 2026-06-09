@@ -651,15 +651,7 @@ class ClipboardManager: ObservableObject {
         
         DispatchQueue.main.async { [weak self] in
             self?.justCopied = true
-            
-            // Move the same item to the top so selection and hover IDs remain stable.
-            if let index = self?.clipboardItems.firstIndex(where: { $0.id == item.id }) {
-                if let movedItem = self?.clipboardItems.remove(at: index) {
-                    self?.clipboardItems.insert(movedItem, at: 0)
-                }
-                self?.saveItems()
-            }
-            
+
             // Reset flags after a brief delay to allow for external clipboard changes
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
                 self?.justCopied = false
