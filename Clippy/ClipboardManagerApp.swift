@@ -625,7 +625,9 @@ class ClipboardAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, O
             NSApp.activate(ignoringOtherApps: true)
             return
         } else if let existingWindow = floatingWindow, existingWindow.isVisible {
-            // If window is already visible, just keep it open
+            // Reassert keyboard focus when the activation shortcut is pressed while open.
+            existingWindow.makeKeyAndOrderFront(nil)
+            NSApp.activate(ignoringOtherApps: true)
             return
         }
         

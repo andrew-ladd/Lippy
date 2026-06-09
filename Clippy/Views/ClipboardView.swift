@@ -195,6 +195,14 @@ struct ClipboardView: View {
     private var activeHoverItemId: UUID? {
         isKeyboardSelectionControllingHover ? keyboardSelectedItemId : (hoveredItemId ?? keyboardSelectedItemId)
     }
+
+    private var keyboardHighlightAnimation: Animation {
+        .easeOut(duration: 0.06)
+    }
+
+    private var keyboardScrollAnimation: Animation {
+        .easeOut(duration: 0.08)
+    }
     
     // Use a more efficient body implementation
     var body: some View {
@@ -919,7 +927,7 @@ struct ClipboardView: View {
             }
             .onChange(of: pendingScrollItemId) { _, itemId in
                 if let itemId = itemId {
-                    withAnimation(.easeInOut(duration: 0.15)) {
+                    withAnimation(keyboardScrollAnimation) {
                         proxy.scrollTo(itemId, anchor: .center)
                     }
                 }
@@ -1257,10 +1265,11 @@ struct ClipboardView: View {
 
     @discardableResult
     private func moveKeyboardSelection(by offset: Int) -> Bool {
+        let itemIds = filteredItems.map { $0.id }
         guard let nextId = ClipboardKeyboardNavigation.nextSelectionId(
             selectedId: keyboardSelectedItemId,
             hoveredId: isKeyboardSelectionControllingHover ? nil : hoveredItemId,
-            itemIds: filteredItems.map { $0.id },
+            itemIds: itemIds,
             offset: offset,
             isQuickLookPresented: showQuickLook,
             isQueueTabSelected: segmentedSelection == 2
@@ -1268,7 +1277,7 @@ struct ClipboardView: View {
             return false
         }
 
-        withAnimation(.easeInOut(duration: 0.12)) {
+        withAnimation(keyboardHighlightAnimation) {
             keyboardSelectedItemId = nextId
             hoveredItemId = nextId
             isKeyboardSelectionControllingHover = true
@@ -1334,7 +1343,7 @@ struct ClipboardView: View {
         let deltaY = mouseLocation.y - lastLocation.y
         guard hypot(deltaX, deltaY) > 1.5 else { return }
 
-        withAnimation(.easeInOut(duration: 0.15)) {
+        withAnimation(.easeOut(duration: 0.08)) {
             isKeyboardSelectionControllingHover = false
             lastMouseHoverLocation = mouseLocation
             hoveredItemId = item.id
@@ -1625,7 +1634,7 @@ struct ClipboardView: View {
                     }
                     .onChange(of: pendingScrollItemId) { _, itemId in
                         if let itemId = itemId {
-                            withAnimation(.easeInOut(duration: 0.15)) {
+                            withAnimation(keyboardScrollAnimation) {
                                 proxy.scrollTo(itemId, anchor: .center)
                             }
                         }
