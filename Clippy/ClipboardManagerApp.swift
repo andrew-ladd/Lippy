@@ -210,8 +210,6 @@ class ClipboardAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, O
         // Initialize AutoUpdater service
         initializeAutoUpdater()
         
-        scheduleAccessibilityPermissionCheck()
-        
         // Check first launch BEFORE showing anything
         let isFirstLaunch = FirstLaunchManager.shared.isFirstLaunch
         
@@ -227,7 +225,16 @@ class ClipboardAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, O
                 name: NSNotification.Name("OnboardingDidComplete"),
                 object: nil
             )
+            NotificationCenter.default.addObserver(
+                forName: NSNotification.Name("OnboardingDidComplete"),
+                object: nil,
+                queue: .main
+            ) { [weak self] _ in
+                self?.scheduleAccessibilityPermissionCheck(delay: 0.5)
+            }
         } else {
+            scheduleAccessibilityPermissionCheck()
+            
             // Normal launch: show floating clipboard window
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
                 self?.showFloatingWindow()
@@ -235,12 +242,12 @@ class ClipboardAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, O
         }
     }
     
-    private func scheduleAccessibilityPermissionCheck() {
+    private func scheduleAccessibilityPermissionCheck(delay: TimeInterval = 0.8) {
         guard ProcessInfo.processInfo.environment["CLIPPY_UI_TESTING"] != "1" else {
             return
         }
         
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) { [weak self] in
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
             self?.showAccessibilityPermissionAlertIfNeeded()
         }
     }

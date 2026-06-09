@@ -48,7 +48,14 @@ enum ClipboardKeyboardNavigation {
             return nil
         }
 
-        let currentId = hoveredId ?? selectedId
+        let currentId: UUID?
+        if let hoveredId, itemIds.contains(hoveredId) {
+            currentId = hoveredId
+        } else if let selectedId, itemIds.contains(selectedId) {
+            currentId = selectedId
+        } else {
+            currentId = nil
+        }
         let currentIndex = currentId.flatMap { itemIds.firstIndex(of: $0) } ?? (offset > 0 ? -1 : itemIds.count)
         let nextIndex = (currentIndex + offset + itemIds.count) % itemIds.count
 
