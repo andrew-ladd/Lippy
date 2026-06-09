@@ -16,8 +16,17 @@ struct ClipboardItemRow: View {
     @State private var isPinHovered = false
     @State private var pinBounce = false
 
-    private var isCodeItem: Bool {
-        item.detectedLanguage != nil
+    private var usesCodeStyleRendering: Bool {
+        if item.detectedLanguage != nil {
+            return true
+        }
+
+        if case .url = item.type,
+           let urlString = item.url?.absoluteString.lowercased() {
+            return urlString.contains("github")
+        }
+
+        return false
     }
     
     var body: some View {
@@ -25,8 +34,8 @@ struct ClipboardItemRow: View {
             .padding(.vertical, 7)
             .padding(.horizontal, 8)
             .modifier(GlassItemModifier(isHovered: isHovered))
-            .scaleEffect(isHovered && !isCodeItem ? 1.01 : 1.0)
-            .animation(isCodeItem ? nil : .spring(response: 0.3, dampingFraction: 0.7), value: isHovered)
+            .scaleEffect(isHovered && !usesCodeStyleRendering ? 1.01 : 1.0)
+            .animation(usesCodeStyleRendering ? nil : .spring(response: 0.3, dampingFraction: 0.7), value: isHovered)
             .frame(maxWidth: .infinity, alignment: .leading)
             .onDrag {
                 switch item.type {

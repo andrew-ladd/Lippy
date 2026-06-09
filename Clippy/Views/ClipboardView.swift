@@ -16,6 +16,7 @@ struct ScrollOffsetPreferenceKey: PreferenceKey {
 
 extension Notification.Name {
     static let clipboardHistoryKeyDown = Notification.Name("ClipboardHistoryKeyDown")
+    static let clipboardWindowDidActivate = Notification.Name("ClipboardWindowDidActivate")
 }
 
 final class ClipboardHistoryKeyEvent {
@@ -106,6 +107,7 @@ struct ClipboardView: View {
     @State private var quickLookURL: URL? = nil
     @State private var showQuickLook = false
     @State private var keyEventMonitor: Any? = nil
+    @State private var windowActivationMonitor: Any? = nil
     @State private var quickLookOpacity: Double = 0.0
     @State private var isQuickLookContentReady = false
     @State private var showClearAllConfirmation = false
@@ -316,10 +318,14 @@ struct ClipboardView: View {
             }
         }
         .onAppear {
-            ensureKeyboardSelectionIsValid()
+            resetActiveHighlightForPresentation()
             if let monitor = keyEventMonitor {
                 NotificationCenter.default.removeObserver(monitor)
                 keyEventMonitor = nil
+            }
+            if let monitor = windowActivationMonitor {
+                NotificationCenter.default.removeObserver(monitor)
+                windowActivationMonitor = nil
             }
             keyEventMonitor = NotificationCenter.default.addObserver(
                 forName: .clipboardHistoryKeyDown,
@@ -331,11 +337,22 @@ struct ClipboardView: View {
                 }
                 keyEvent.handled = handleKeyboardEvent(keyCode: keyEvent.keyCode)
             }
+            windowActivationMonitor = NotificationCenter.default.addObserver(
+                forName: .clipboardWindowDidActivate,
+                object: nil,
+                queue: .main
+            ) { _ in
+                resetActiveHighlightForPresentation()
+            }
         }
         .onDisappear {
             if let monitor = keyEventMonitor {
                 NotificationCenter.default.removeObserver(monitor)
                 keyEventMonitor = nil
+            }
+            if let monitor = windowActivationMonitor {
+                NotificationCenter.default.removeObserver(monitor)
+                windowActivationMonitor = nil
             }
         }
         // Monitor Queue Mode state changes reliably from the root view
@@ -921,6 +938,8 @@ struct ClipboardView: View {
                 .animation(.spring(response: 0.3, dampingFraction: 0.8), value: isSelectMode)
                 .animation(.spring(response: 0.3, dampingFraction: 0.8), value: showCategoryBar)
             }
+            .contentMargins(.top, contentTopPadding, for: .scrollIndicators)
+            .contentMargins(.bottom, 55, for: .scrollIndicators)
             .coordinateSpace(name: "scroll")
             .onPreferenceChange(ScrollOffsetPreferenceKey.self) { value in
                 handleScrollChange(newOffset: value)
@@ -1240,15 +1259,17 @@ struct ClipboardView: View {
     }
 
     private func selectedItemForKeyboardAction() -> ClipboardItem? {
-        guard let itemId = ClipboardKeyboardNavigation.actionItemId(
-            hoveredId: isKeyboardSelectionControllingHover ? nil : hoveredItemId,
-            selectedId: keyboardSelectedItemId,
-            itemIds: filteredItems.map { $0.id },
-            isQuickLookPresented: showQuickLook,
-            isQueueTabSelected: segmentedSelection == 2
-        ) else { return nil }
+        guard !showQuickLook, segmentedSelection != 2 else {
+            return nil
+        }
 
-        return filteredItems.first { $0.id == itemId }
+        let items = filteredItems
+        let itemIds = items.map { $0.id }
+        guard let itemId = activeHoverItemId.flatMap({ itemIds.contains($0) ? $0 : nil }) ?? itemIds.first else {
+            return nil
+        }
+
+        return items.first { $0.id == itemId }
     }
 
     private func ensureKeyboardSelectionIsValid() {
@@ -1263,12 +1284,28 @@ struct ClipboardView: View {
         pendingScrollItemId = validId
     }
 
+    private func resetActiveHighlightForPresentation() {
+        let itemIds = filteredItems.map { $0.id }
+        let validId = ClipboardKeyboardNavigation.validSelectionId(
+            selectedId: keyboardSelectedItemId,
+            itemIds: itemIds,
+            isQueueTabSelected: segmentedSelection == 2
+        )
+
+        hoveredItemId = nil
+        keyboardSelectedItemId = validId
+        isKeyboardSelectionControllingHover = true
+        lastMouseHoverLocation = nil
+        expandableItemId = nil
+        pendingScrollItemId = validId
+    }
+
     @discardableResult
     private func moveKeyboardSelection(by offset: Int) -> Bool {
         let itemIds = filteredItems.map { $0.id }
         guard let nextId = ClipboardKeyboardNavigation.nextSelectionId(
             selectedId: keyboardSelectedItemId,
-            hoveredId: isKeyboardSelectionControllingHover ? nil : hoveredItemId,
+            hoveredId: nil,
             itemIds: itemIds,
             offset: offset,
             isQuickLookPresented: showQuickLook,
@@ -1299,6 +1336,11 @@ struct ClipboardView: View {
     }
     
     private func handleItemHover(isHovered: Bool, item: ClipboardItem) {
+        if isHovered && isKeyboardSelectionControllingHover {
+            lastMouseHoverLocation = NSEvent.mouseLocation
+            return
+        }
+
         withAnimation(.easeInOut(duration: 0.15)) {
             if isHovered {
                 isKeyboardSelectionControllingHover = false
@@ -1310,12 +1352,14 @@ struct ClipboardView: View {
             }
         }
         
+        let canExpandOnHover = item.detectedLanguage == nil && !isCodeStyleURL(item)
+
         // Only allow expansion when NOT scrolling
-        if isHovered && !isScrolling && item.detectedLanguage == nil {
+        if isHovered && !isScrolling && canExpandOnHover {
             // Small delay before expanding to avoid flicker
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
                 // Check we're still hovering the same item and still not scrolling
-                if hoveredItemId == item.id && !isScrolling && item.detectedLanguage == nil {
+                if hoveredItemId == item.id && !isScrolling && canExpandOnHover {
                     withAnimation(.easeOut(duration: 0.2)) {
                         expandableItemId = item.id
                     }
@@ -1328,6 +1372,15 @@ struct ClipboardView: View {
                 }
             }
         }
+    }
+
+    private func isCodeStyleURL(_ item: ClipboardItem) -> Bool {
+        guard case .url = item.type,
+              let urlString = item.url?.absoluteString.lowercased() else {
+            return false
+        }
+
+        return urlString.contains("github")
     }
 
     private func handleItemMouseMoved(_ item: ClipboardItem) {
@@ -1628,6 +1681,8 @@ struct ClipboardView: View {
                         .animation(.spring(response: 0.25, dampingFraction: 0.75), value: filteredItems.map { $0.id })
                         .animation(.spring(response: 0.3, dampingFraction: 0.8), value: showCategoryBar)
                     }
+                    .contentMargins(.top, contentTopPadding, for: .scrollIndicators)
+                    .contentMargins(.bottom, 55, for: .scrollIndicators)
                     .coordinateSpace(name: "pinnedScroll")
                     .onPreferenceChange(ScrollOffsetPreferenceKey.self) { value in
                         handleScrollChange(newOffset: value)

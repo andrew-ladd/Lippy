@@ -652,22 +652,10 @@ class ClipboardManager: ObservableObject {
         DispatchQueue.main.async { [weak self] in
             self?.justCopied = true
             
-            // Move item to top of list if it exists
+            // Move the same item to the top so selection and hover IDs remain stable.
             if let index = self?.clipboardItems.firstIndex(where: { $0.id == item.id }) {
-                // Create a new item with the same content to trigger code detection
-                if item.type == .text, let text = item.text {
-                    let newItem = ClipboardItem(
-                        text: text,
-                        originalText: item.originalText,
-                        isSensitive: item.isSensitive,
-                        isFromHandoff: item.isFromHandoff
-                    )
-                    self?.clipboardItems.remove(at: index)
-                    self?.clipboardItems.insert(newItem, at: 0)
-                } else {
-                    if let movedItem = self?.clipboardItems.remove(at: index) {
-                        self?.clipboardItems.insert(movedItem, at: 0)
-                    }
+                if let movedItem = self?.clipboardItems.remove(at: index) {
+                    self?.clipboardItems.insert(movedItem, at: 0)
                 }
                 self?.saveItems()
             }

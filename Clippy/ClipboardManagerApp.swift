@@ -623,11 +623,13 @@ class ClipboardAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, O
         if let existingWindow = floatingWindow, !existingWindow.isVisible {
             existingWindow.makeKeyAndOrderFront(nil)
             NSApp.activate(ignoringOtherApps: true)
+            NotificationCenter.default.post(name: .clipboardWindowDidActivate, object: existingWindow)
             return
         } else if let existingWindow = floatingWindow, existingWindow.isVisible {
             // Reassert keyboard focus when the activation shortcut is pressed while open.
             existingWindow.makeKeyAndOrderFront(nil)
             NSApp.activate(ignoringOtherApps: true)
+            NotificationCenter.default.post(name: .clipboardWindowDidActivate, object: existingWindow)
             return
         }
         
@@ -1051,6 +1053,7 @@ class ClipboardAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, O
         // Finally show the window with animation
         window.animator().alphaValue = 1.0
         window.makeKeyAndOrderFront(nil)
+        NotificationCenter.default.post(name: .clipboardWindowDidActivate, object: window)
         
         // Restore previous position if available
         if let savedPosition = UserDefaults.standard.string(forKey: floatingWindowPositionKey) {

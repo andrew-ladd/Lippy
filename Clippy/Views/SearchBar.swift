@@ -147,7 +147,7 @@ struct GlassItemModifier: ViewModifier {
                     RoundedRectangle(cornerRadius: cornerRadius)
                         .fill(isHovered ? Color.accentColor.opacity(0.12) : Color.gray.opacity(colorScheme == .dark ? 0.18 : 0.10))
                 )
-                .glassEffect(.regular.interactive(), in: .rect(cornerRadius: cornerRadius))
+                .glassEffect(.regular, in: .rect(cornerRadius: cornerRadius))
         } else {
             content
                 .background(
