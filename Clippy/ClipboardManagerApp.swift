@@ -1399,8 +1399,11 @@ class KeyEventHandlerView: NSView {
     
     override func keyDown(with event: NSEvent) {
         switch event.keyCode {
-        case 36, 49, 53, 76, 125, 126:
-            let keyEvent = ClipboardHistoryKeyEvent(keyCode: event.keyCode)
+        case 36, 48, 49, 53, 76, 125, 126:
+            let keyEvent = ClipboardHistoryKeyEvent(
+                keyCode: event.keyCode,
+                modifierFlags: event.modifierFlags
+            )
             NotificationCenter.default.post(name: .clipboardHistoryKeyDown, object: keyEvent)
 
             if keyEvent.handled {

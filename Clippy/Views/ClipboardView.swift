@@ -19,12 +19,19 @@ extension Notification.Name {
     static let clipboardWindowDidActivate = Notification.Name("ClipboardWindowDidActivate")
 }
 
+private enum ClipboardScrollTarget {
+    static let top = "clipboard-scroll-top"
+    static let pinnedTop = "clipboard-pinned-scroll-top"
+}
+
 final class ClipboardHistoryKeyEvent {
     let keyCode: UInt16
+    let modifierFlags: NSEvent.ModifierFlags
     var handled = false
 
-    init(keyCode: UInt16) {
+    init(keyCode: UInt16, modifierFlags: NSEvent.ModifierFlags = []) {
         self.keyCode = keyCode
+        self.modifierFlags = modifierFlags
     }
 }
 
@@ -335,7 +342,10 @@ struct ClipboardView: View {
                 guard let keyEvent = notification.object as? ClipboardHistoryKeyEvent else {
                     return
                 }
-                keyEvent.handled = handleKeyboardEvent(keyCode: keyEvent.keyCode)
+                keyEvent.handled = handleKeyboardEvent(
+                    keyCode: keyEvent.keyCode,
+                    modifierFlags: keyEvent.modifierFlags
+                )
             }
             windowActivationMonitor = NotificationCenter.default.addObserver(
                 forName: .clipboardWindowDidActivate,
@@ -914,6 +924,10 @@ struct ClipboardView: View {
     private var clipboardItemsListView: some View {
         ScrollViewReader { proxy in
             ScrollView {
+                Color.clear
+                    .frame(height: 0)
+                    .id(ClipboardScrollTarget.top)
+
                 LazyVStack(spacing: isSelectMode ? 4 : 3) {
                     // Scroll offset tracker
                     GeometryReader { geo in
@@ -947,7 +961,11 @@ struct ClipboardView: View {
             .onChange(of: pendingScrollItemId) { _, itemId in
                 if let itemId = itemId {
                     withAnimation(keyboardScrollAnimation) {
-                        proxy.scrollTo(itemId, anchor: .center)
+                        if itemId == filteredItems.first?.id {
+                            proxy.scrollTo(ClipboardScrollTarget.top, anchor: .top)
+                        } else {
+                            proxy.scrollTo(itemId, anchor: .center)
+                        }
                     }
                 }
             }
@@ -1205,7 +1223,14 @@ struct ClipboardView: View {
         }
     }
 
-    private func handleKeyboardEvent(keyCode: UInt16) -> Bool {
+    private func handleKeyboardEvent(
+        keyCode: UInt16,
+        modifierFlags: NSEvent.ModifierFlags = []
+    ) -> Bool {
+        // Tab: keyCode 48
+        if keyCode == 48 {
+            return cycleTab(reverse: modifierFlags.contains(.shift))
+        }
         // Spacebar: keyCode 49
         if keyCode == 49 {
             if let item = selectedItemForKeyboardAction(), canShowQuickLook(for: item) {
@@ -1258,6 +1283,21 @@ struct ClipboardView: View {
         return false
     }
 
+    @discardableResult
+    private func cycleTab(reverse: Bool) -> Bool {
+        guard !showQuickLook else {
+            return false
+        }
+
+        withAnimation(.spring(response: 0.3, dampingFraction: 0.7)) {
+            let tabCount = 3
+            let offset = reverse ? -1 : 1
+            segmentedSelection = (segmentedSelection + offset + tabCount) % tabCount
+        }
+
+        return true
+    }
+
     private func selectedItemForKeyboardAction() -> ClipboardItem? {
         guard !showQuickLook, segmentedSelection != 2 else {
             return nil
@@ -1265,7 +1305,13 @@ struct ClipboardView: View {
 
         let items = filteredItems
         let itemIds = items.map { $0.id }
-        guard let itemId = activeHoverItemId.flatMap({ itemIds.contains($0) ? $0 : nil }) ?? itemIds.first else {
+        guard let itemId = ClipboardKeyboardNavigation.actionItemId(
+            hoveredId: activeHoverItemId,
+            selectedId: nil,
+            itemIds: itemIds,
+            isQuickLookPresented: showQuickLook,
+            isQueueTabSelected: segmentedSelection == 2
+        ) else {
             return nil
         }
 
@@ -1281,23 +1327,23 @@ struct ClipboardView: View {
         )
 
         keyboardSelectedItemId = validId
+        updateKeyboardHighlightExpansion(for: validId)
         pendingScrollItemId = validId
     }
 
     private func resetActiveHighlightForPresentation() {
         let itemIds = filteredItems.map { $0.id }
-        let validId = ClipboardKeyboardNavigation.validSelectionId(
-            selectedId: keyboardSelectedItemId,
+        let initialId = ClipboardKeyboardNavigation.initialPresentationSelectionId(
             itemIds: itemIds,
             isQueueTabSelected: segmentedSelection == 2
         )
 
         hoveredItemId = nil
-        keyboardSelectedItemId = validId
+        keyboardSelectedItemId = initialId
         isKeyboardSelectionControllingHover = true
         lastMouseHoverLocation = nil
-        expandableItemId = nil
-        pendingScrollItemId = validId
+        updateKeyboardHighlightExpansion(for: initialId)
+        pendingScrollItemId = nil
     }
 
     @discardableResult
@@ -1319,7 +1365,7 @@ struct ClipboardView: View {
             hoveredItemId = nextId
             isKeyboardSelectionControllingHover = true
             lastMouseHoverLocation = nil
-            expandableItemId = nil
+            updateKeyboardHighlightExpansion(for: nextId)
         }
         pendingScrollItemId = nextId
         return true
@@ -1352,14 +1398,12 @@ struct ClipboardView: View {
             }
         }
         
-        let canExpandOnHover = item.detectedLanguage == nil && !isCodeStyleURL(item)
-
         // Only allow expansion when NOT scrolling
-        if isHovered && !isScrolling && canExpandOnHover {
+        if isHovered && !isScrolling && canExpandOnHover(item) {
             // Small delay before expanding to avoid flicker
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
                 // Check we're still hovering the same item and still not scrolling
-                if hoveredItemId == item.id && !isScrolling && canExpandOnHover {
+                if hoveredItemId == item.id && !isScrolling && canExpandOnHover(item) {
                     withAnimation(.easeOut(duration: 0.2)) {
                         expandableItemId = item.id
                     }
@@ -1372,6 +1416,22 @@ struct ClipboardView: View {
                 }
             }
         }
+    }
+
+    private func canExpandOnHover(_ item: ClipboardItem) -> Bool {
+        item.detectedLanguage == nil && (item.type == .url || !isCodeStyleURL(item))
+    }
+
+    private func updateKeyboardHighlightExpansion(for itemId: UUID?) {
+        guard let itemId,
+              let item = filteredItems.first(where: { $0.id == itemId }),
+              item.type == .url,
+              !isScrolling else {
+            expandableItemId = nil
+            return
+        }
+
+        expandableItemId = item.id
     }
 
     private func isCodeStyleURL(_ item: ClipboardItem) -> Bool {
@@ -1401,7 +1461,7 @@ struct ClipboardView: View {
             lastMouseHoverLocation = mouseLocation
             hoveredItemId = item.id
             keyboardSelectedItemId = item.id
-            expandableItemId = nil
+            expandableItemId = !isScrolling && canExpandOnHover(item) ? item.id : nil
         }
     }
     
@@ -1658,6 +1718,10 @@ struct ClipboardView: View {
             } else {
                 ScrollViewReader { proxy in
                     ScrollView {
+                        Color.clear
+                            .frame(height: 0)
+                            .id(ClipboardScrollTarget.pinnedTop)
+
                         LazyVStack(spacing: 3) {
                             // Scroll offset tracker
                             GeometryReader { geo in
@@ -1690,7 +1754,11 @@ struct ClipboardView: View {
                     .onChange(of: pendingScrollItemId) { _, itemId in
                         if let itemId = itemId {
                             withAnimation(keyboardScrollAnimation) {
-                                proxy.scrollTo(itemId, anchor: .center)
+                                if itemId == filteredItems.first?.id {
+                                    proxy.scrollTo(ClipboardScrollTarget.pinnedTop, anchor: .top)
+                                } else {
+                                    proxy.scrollTo(itemId, anchor: .center)
+                                }
                             }
                         }
                     }

@@ -277,7 +277,8 @@ struct ClipboardItemRow: View {
                     Text(url.absoluteString)
                         .font(.system(size: 11))
                         .foregroundColor(.secondary)
-                        .lineLimit(1)
+                        .lineLimit(nil)
+                        .fixedSize(horizontal: false, vertical: true)
                 }
             } else {
                 Text(item.preview)

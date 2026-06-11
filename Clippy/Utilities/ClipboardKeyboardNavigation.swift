@@ -36,6 +36,17 @@ enum ClipboardKeyboardNavigation {
         return itemIds.first
     }
 
+    static func initialPresentationSelectionId(
+        itemIds: [UUID],
+        isQueueTabSelected: Bool
+    ) -> UUID? {
+        guard !isQueueTabSelected else {
+            return nil
+        }
+
+        return itemIds.first
+    }
+
     static func nextSelectionId(
         selectedId: UUID?,
         hoveredId: UUID?,

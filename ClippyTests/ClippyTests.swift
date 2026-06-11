@@ -120,6 +120,50 @@ struct ClipboardKeyboardNavigationTests {
         #expect(actionId == itemIds[1])
     }
 
+    @Test func actionItemUsesSelectionWhenThereIsNoHover() {
+        let actionId = ClipboardKeyboardNavigation.actionItemId(
+            hoveredId: nil,
+            selectedId: itemIds[1],
+            itemIds: itemIds,
+            isQuickLookPresented: false,
+            isQueueTabSelected: false
+        )
+
+        #expect(actionId == itemIds[1])
+    }
+
+    @Test func actionItemFallsBackToFirstItemWhenActiveItemIsStale() {
+        let actionId = ClipboardKeyboardNavigation.actionItemId(
+            hoveredId: missingItemId,
+            selectedId: nil,
+            itemIds: itemIds,
+            isQuickLookPresented: false,
+            isQueueTabSelected: false
+        )
+
+        #expect(actionId == itemIds[0])
+    }
+
+    @Test func actionItemIsDisabledForQueueTabAndQuickLook() {
+        let queueActionId = ClipboardKeyboardNavigation.actionItemId(
+            hoveredId: itemIds[0],
+            selectedId: nil,
+            itemIds: itemIds,
+            isQuickLookPresented: false,
+            isQueueTabSelected: true
+        )
+        let quickLookActionId = ClipboardKeyboardNavigation.actionItemId(
+            hoveredId: itemIds[0],
+            selectedId: nil,
+            itemIds: itemIds,
+            isQuickLookPresented: true,
+            isQueueTabSelected: false
+        )
+
+        #expect(queueActionId == nil)
+        #expect(quickLookActionId == nil)
+    }
+
     @Test func invalidSelectionFallsBackToFirstItem() {
         let validId = ClipboardKeyboardNavigation.validSelectionId(
             selectedId: missingItemId,
@@ -128,6 +172,24 @@ struct ClipboardKeyboardNavigationTests {
         )
 
         #expect(validId == itemIds[0])
+    }
+
+    @Test func presentationSelectionAlwaysStartsAtFirstItem() {
+        let initialId = ClipboardKeyboardNavigation.initialPresentationSelectionId(
+            itemIds: itemIds,
+            isQueueTabSelected: false
+        )
+
+        #expect(initialId == itemIds[0])
+    }
+
+    @Test func presentationSelectionIsDisabledForQueueTab() {
+        let initialId = ClipboardKeyboardNavigation.initialPresentationSelectionId(
+            itemIds: itemIds,
+            isQueueTabSelected: true
+        )
+
+        #expect(initialId == nil)
     }
 
     @Test func navigationIsDisabledForQueueTabAndQuickLook() {
