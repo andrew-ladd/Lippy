@@ -647,12 +647,16 @@ class ClipboardAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, O
         isShowingFloatingWindow = true
         
         // Create and show floating window with ChatGPT and visionOS-inspired styling
-        let window = NSPanel(
+        let window = EscapeHandlingPanel(
             contentRect: NSRect(x: 0, y: 0, width: 320, height: 400),
             styleMask: [.titled, .closable, .fullSizeContentView, .nonactivatingPanel],
             backing: .buffered,
             defer: false
         )
+        window.onEsc = { [weak self, weak window] in
+            guard let self, let window else { return }
+            self.fadeOutAndCloseWindow(window)
+        }
         
         // When window is closed, set our reference to nil
         window.delegate = self
@@ -1389,7 +1393,28 @@ class ClipboardAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, O
     }
 }
 
-// KeyEventHandlerView for intercepting ESC key events
+final class EscapeHandlingPanel: NSPanel {
+    var onEsc: (() -> Void)?
+
+    override func sendEvent(_ event: NSEvent) {
+        guard event.type == .keyDown, event.keyCode == 53 else {
+            super.sendEvent(event)
+            return
+        }
+
+        let keyEvent = ClipboardHistoryKeyEvent(
+            keyCode: event.keyCode,
+            modifierFlags: event.modifierFlags
+        )
+        NotificationCenter.default.post(name: .clipboardHistoryKeyDown, object: keyEvent)
+
+        if !keyEvent.handled {
+            onEsc?()
+        }
+    }
+}
+
+// KeyEventHandlerView for intercepting keyboard navigation events
 class KeyEventHandlerView: NSView {
     var onEsc: (() -> Void)?
     
