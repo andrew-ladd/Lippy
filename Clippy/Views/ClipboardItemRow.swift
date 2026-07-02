@@ -35,7 +35,7 @@ struct ClipboardItemRow: View {
             .padding(.horizontal, 8)
             .modifier(GlassItemModifier(isHovered: isHovered))
             .scaleEffect(isHovered && !usesCodeStyleRendering ? 1.01 : 1.0)
-            .animation(usesCodeStyleRendering ? nil : .spring(response: 0.3, dampingFraction: 0.7), value: isHovered)
+            .animation(usesCodeStyleRendering ? nil : .easeOut(duration: 0.08), value: isHovered)
             .frame(maxWidth: .infinity, alignment: .leading)
             .onDrag {
                 switch item.type {
