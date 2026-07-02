@@ -105,6 +105,8 @@ struct ClipboardView: View {
     @State private var lastMouseHoverLocation: CGPoint? = nil
     @State private var pendingScrollRequest: ClipboardScrollRequest? = nil
     @State private var itemFrames: [UUID: CGRect] = [:]
+    @State private var scrollViewportHeight: CGFloat = 0
+    @State private var expansionAdjustmentItemId: UUID? = nil
     @State private var isClearing = false
     @State private var trashFilled = false
     @Environment(\.colorScheme) private var colorScheme
@@ -135,6 +137,8 @@ struct ClipboardView: View {
     @State private var scrollEndWorkItem: DispatchWorkItem? = nil
     @State private var lastScrollOffset: CGFloat = 0
     @State private var expandableItemId: UUID? = nil  // Only set when scroll stops + hover
+
+    private let footerContentInset: CGFloat = 55
     
     // Add the timeAgo function right here, before it's used
     private func timeAgo(from date: Date) -> String {
@@ -391,10 +395,18 @@ struct ClipboardView: View {
             }
         }
         .onChange(of: segmentedSelection) {
+            itemFrames.removeAll(keepingCapacity: true)
             ensureKeyboardSelectionIsValid()
         }
-        .onChange(of: filteredItems.map { $0.id }) {
+        .onChange(of: filteredItems.map { $0.id }) { _, itemIds in
+            let validIds = Set(itemIds)
+            itemFrames = itemFrames.filter { validIds.contains($0.key) }
             ensureKeyboardSelectionIsValid()
+        }
+        .onChange(of: expandableItemId) { _, itemId in
+            if itemId == nil {
+                expansionAdjustmentItemId = nil
+            }
         }
     }
     
@@ -900,7 +912,7 @@ struct ClipboardView: View {
             }
         }
         .padding(.top, contentTopPadding) // Account for floating header + tab bar
-        .padding(.bottom, 55) // Account for floating footer
+        .padding(.bottom, footerContentInset) // Account for floating footer
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .animation(.spring(response: 0.3, dampingFraction: 0.8), value: showCategoryBar)
     }
@@ -923,7 +935,7 @@ struct ClipboardView: View {
                 .padding(.horizontal)
         }
         .padding(.top, contentTopPadding)
-        .padding(.bottom, 55)
+        .padding(.bottom, footerContentInset)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .animation(.spring(response: 0.3, dampingFraction: 0.8), value: showCategoryBar)
     }
@@ -949,7 +961,7 @@ struct ClipboardView: View {
                             .onGeometryChange(for: CGRect.self) { geometry in
                                 geometry.frame(in: .named("scroll"))
                             } action: { frame in
-                                itemFrames[item.id] = frame
+                                recordItemFrame(item.id, frame: frame)
                             }
                             .transition(.asymmetric(
                                 insertion: .opacity.combined(with: .scale(scale: 0.96, anchor: .center)),
@@ -957,7 +969,7 @@ struct ClipboardView: View {
                             ))
                     }
                 }
-                .padding(.bottom, 55) // Floating footer pill space
+                .padding(.bottom, footerContentInset) // Floating footer pill space
                 .padding(.horizontal, isSelectMode ? 0 : 8)
                 .animation(.spring(response: 0.25, dampingFraction: 0.75), value: filteredItems.map { $0.id })
                 .animation(.spring(response: 0.3, dampingFraction: 0.8), value: isSelectMode)
@@ -966,8 +978,13 @@ struct ClipboardView: View {
             }
             .contentMargins(.top, contentTopPadding, for: .scrollContent)
             .contentMargins(.top, contentTopPadding, for: .scrollIndicators)
-            .contentMargins(.bottom, 55, for: .scrollIndicators)
+            .contentMargins(.bottom, footerContentInset, for: .scrollIndicators)
             .coordinateSpace(name: "scroll")
+            .onGeometryChange(for: CGFloat.self) { geometry in
+                geometry.size.height
+            } action: { height in
+                scrollViewportHeight = height
+            }
             .onPreferenceChange(ScrollOffsetPreferenceKey.self) { value in
                 handleScrollChange(newOffset: value)
             }
@@ -1378,7 +1395,14 @@ struct ClipboardView: View {
         isKeyboardSelectionControllingHover = true
         lastMouseHoverLocation = nil
         updateKeyboardHighlightExpansion(for: initialId)
-        pendingScrollRequest = nil
+        if let initialId {
+            pendingScrollRequest = ClipboardScrollRequest(
+                itemId: initialId,
+                isAnimated: false
+            )
+        } else {
+            pendingScrollRequest = nil
+        }
     }
 
     @discardableResult
@@ -1426,6 +1450,7 @@ struct ClipboardView: View {
         forceScroll: Bool = false
     ) -> Bool {
         let needsScroll = forceScroll || !isItemFullyVisible(itemId)
+        expansionAdjustmentItemId = nil
         withAnimation(keyboardHighlightAnimation) {
             keyboardSelectedItemId = itemId
             hoveredItemId = itemId
@@ -1476,6 +1501,7 @@ struct ClipboardView: View {
 
     private func isItemFullyVisible(_ itemId: UUID) -> Bool {
         guard
+            scrollViewportHeight > 0,
             let frame = itemFrames[itemId]
         else {
             return false
@@ -1483,7 +1509,52 @@ struct ClipboardView: View {
 
         let visibilityTolerance: CGFloat = 1
         return frame.minY >= contentTopPadding - visibilityTolerance
-            && frame.maxY <= 400 - 55 + visibilityTolerance
+            && frame.maxY <= scrollViewportHeight - footerContentInset + visibilityTolerance
+    }
+
+    private func recordItemFrame(_ itemId: UUID, frame: CGRect) {
+        guard scrollViewportHeight > 0 else {
+            itemFrames[itemId] = frame
+            return
+        }
+
+        let visibleBottom = scrollViewportHeight - footerContentInset
+        guard frame.maxY >= contentTopPadding, frame.minY <= visibleBottom else {
+            itemFrames.removeValue(forKey: itemId)
+            return
+        }
+
+        itemFrames[itemId] = frame
+
+        guard
+            itemId == keyboardSelectedItemId,
+            itemId == expandableItemId,
+            isKeyboardSelectionControllingHover,
+            frame.minY > contentTopPadding + 1,
+            frame.maxY > visibleBottom + 1,
+            expansionAdjustmentItemId != itemId
+        else {
+            return
+        }
+
+        expansionAdjustmentItemId = itemId
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
+            guard
+                keyboardSelectedItemId == itemId,
+                expandableItemId == itemId,
+                isKeyboardSelectionControllingHover,
+                let settledFrame = itemFrames[itemId],
+                settledFrame.minY > contentTopPadding + 1,
+                settledFrame.maxY > scrollViewportHeight - footerContentInset + 1
+            else {
+                return
+            }
+
+            pendingScrollRequest = ClipboardScrollRequest(
+                itemId: itemId,
+                isAnimated: false
+            )
+        }
     }
 
     private func toggleSelection(for item: ClipboardItem) {
@@ -1851,7 +1922,7 @@ struct ClipboardView: View {
                                     .onGeometryChange(for: CGRect.self) { geometry in
                                         geometry.frame(in: .named("pinnedScroll"))
                                     } action: { frame in
-                                        itemFrames[item.id] = frame
+                                        recordItemFrame(item.id, frame: frame)
                                     }
                                     .transition(.asymmetric(
                                         insertion: .opacity.combined(with: .scale(scale: 0.96, anchor: .center)),
@@ -1859,7 +1930,7 @@ struct ClipboardView: View {
                                     ))
                             }
                         }
-                        .padding(.bottom, 55) // Floating footer pill space
+                        .padding(.bottom, footerContentInset) // Floating footer pill space
                         .padding(.horizontal, 8)
                         .animation(.spring(response: 0.25, dampingFraction: 0.75), value: filteredItems.map { $0.id })
                         .animation(.spring(response: 0.3, dampingFraction: 0.8), value: showCategoryBar)
@@ -1867,8 +1938,13 @@ struct ClipboardView: View {
                     }
                     .contentMargins(.top, contentTopPadding, for: .scrollContent)
                     .contentMargins(.top, contentTopPadding, for: .scrollIndicators)
-                    .contentMargins(.bottom, 55, for: .scrollIndicators)
+                    .contentMargins(.bottom, footerContentInset, for: .scrollIndicators)
                     .coordinateSpace(name: "pinnedScroll")
+                    .onGeometryChange(for: CGFloat.self) { geometry in
+                        geometry.size.height
+                    } action: { height in
+                        scrollViewportHeight = height
+                    }
                     .onPreferenceChange(ScrollOffsetPreferenceKey.self) { value in
                         handleScrollChange(newOffset: value)
                     }

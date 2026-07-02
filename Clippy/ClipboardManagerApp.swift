@@ -1404,10 +1404,6 @@ final class EscapeHandlingPanel: NSPanel {
         if event.type == .leftMouseDown, (!NSApp.isActive || !isKeyWindow) {
             NSApp.activate(ignoringOtherApps: true)
             makeKeyAndOrderFront(nil)
-            NotificationCenter.default.post(
-                name: .clipboardWindowDidActivate,
-                object: self
-            )
         }
 
         guard event.type == .keyDown, event.keyCode == 53 else {
