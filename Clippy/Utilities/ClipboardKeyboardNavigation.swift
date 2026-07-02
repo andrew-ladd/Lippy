@@ -72,4 +72,17 @@ enum ClipboardKeyboardNavigation {
 
         return itemIds[nextIndex]
     }
+
+    static func boundarySelectionId(
+        itemIds: [UUID],
+        selectLast: Bool,
+        isQuickLookPresented: Bool,
+        isQueueTabSelected: Bool
+    ) -> UUID? {
+        guard !isQuickLookPresented, !isQueueTabSelected else {
+            return nil
+        }
+
+        return selectLast ? itemIds.last : itemIds.first
+    }
 }

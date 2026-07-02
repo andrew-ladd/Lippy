@@ -213,4 +213,40 @@ struct ClipboardKeyboardNavigationTests {
         #expect(queueNextId == nil)
         #expect(quickLookNextId == nil)
     }
+
+    @Test func commandArrowSelectsRequestedBoundary() {
+        let firstId = ClipboardKeyboardNavigation.boundarySelectionId(
+            itemIds: itemIds,
+            selectLast: false,
+            isQuickLookPresented: false,
+            isQueueTabSelected: false
+        )
+        let lastId = ClipboardKeyboardNavigation.boundarySelectionId(
+            itemIds: itemIds,
+            selectLast: true,
+            isQuickLookPresented: false,
+            isQueueTabSelected: false
+        )
+
+        #expect(firstId == itemIds.first)
+        #expect(lastId == itemIds.last)
+    }
+
+    @Test func boundaryNavigationIsDisabledForQueueTabAndQuickLook() {
+        let queueId = ClipboardKeyboardNavigation.boundarySelectionId(
+            itemIds: itemIds,
+            selectLast: false,
+            isQuickLookPresented: false,
+            isQueueTabSelected: true
+        )
+        let quickLookId = ClipboardKeyboardNavigation.boundarySelectionId(
+            itemIds: itemIds,
+            selectLast: true,
+            isQuickLookPresented: true,
+            isQueueTabSelected: false
+        )
+
+        #expect(queueId == nil)
+        #expect(quickLookId == nil)
+    }
 }

@@ -18,10 +18,12 @@ build:
 		CODE_SIGNING_ALLOWED=NO
 
 install: build
+	-killall Clippy
+	rm -rf "$(INSTALLED_APP)"
 	ditto "$(BUILT_APP)" "$(INSTALLED_APP)"
+	codesign --force --deep --sign - "$(INSTALLED_APP)"
 
 reinstall: install
-	-killall Clippy
 	open "$(INSTALLED_APP)"
 
 uninstall:

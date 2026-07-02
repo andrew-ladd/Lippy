@@ -1396,7 +1396,16 @@ class ClipboardAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, O
 final class EscapeHandlingPanel: NSPanel {
     var onEsc: (() -> Void)?
 
+    override var canBecomeKey: Bool {
+        true
+    }
+
     override func sendEvent(_ event: NSEvent) {
+        if event.type == .leftMouseDown, (!NSApp.isActive || !isKeyWindow) {
+            NSApp.activate(ignoringOtherApps: true)
+            makeKeyAndOrderFront(nil)
+        }
+
         guard event.type == .keyDown, event.keyCode == 53 else {
             super.sendEvent(event)
             return

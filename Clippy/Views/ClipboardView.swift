@@ -25,10 +25,9 @@ private enum ClipboardScrollTarget {
 }
 
 private struct ClipboardScrollRequest: Equatable {
+    let id = UUID()
     let itemId: UUID
-    let animated: Bool
-    // Included in Equatable synthesis to ensure repeated requests trigger `.onChange`.
-    private let requestId = UUID()
+    let isAnimated: Bool
 }
 
 final class ClipboardHistoryKeyEvent {
@@ -104,7 +103,10 @@ struct ClipboardView: View {
     @State private var keyboardSelectedItemId: UUID? = nil
     @State private var isKeyboardSelectionControllingHover = false
     @State private var lastMouseHoverLocation: CGPoint? = nil
-    @State private var scrollRequest: ClipboardScrollRequest? = nil
+    @State private var pendingScrollRequest: ClipboardScrollRequest? = nil
+    @State private var pendingExpansionVisibilityCheckItemId: UUID? = nil
+    @State private var itemFrames: [UUID: CGRect] = [:]
+    @State private var scrollViewportHeight: CGFloat = 0
     @State private var isClearing = false
     @State private var trashFilled = false
     @Environment(\.colorScheme) private var colorScheme
@@ -135,6 +137,8 @@ struct ClipboardView: View {
     @State private var scrollEndWorkItem: DispatchWorkItem? = nil
     @State private var lastScrollOffset: CGFloat = 0
     @State private var expandableItemId: UUID? = nil  // Only set when scroll stops + hover
+
+    private let footerContentInset: CGFloat = 55
     
     // Add the timeAgo function right here, before it's used
     private func timeAgo(from date: Date) -> String {
@@ -391,9 +395,12 @@ struct ClipboardView: View {
             }
         }
         .onChange(of: segmentedSelection) {
+            itemFrames.removeAll(keepingCapacity: true)
             ensureKeyboardSelectionIsValid()
         }
-        .onChange(of: filteredItems.map { $0.id }) {
+        .onChange(of: filteredItems.map { $0.id }) { _, itemIds in
+            let validIds = Set(itemIds)
+            itemFrames = itemFrames.filter { validIds.contains($0.key) }
             ensureKeyboardSelectionIsValid()
         }
     }
@@ -900,7 +907,7 @@ struct ClipboardView: View {
             }
         }
         .padding(.top, contentTopPadding) // Account for floating header + tab bar
-        .padding(.bottom, 55) // Account for floating footer
+        .padding(.bottom, footerContentInset) // Account for floating footer
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .animation(.spring(response: 0.3, dampingFraction: 0.8), value: showCategoryBar)
     }
@@ -923,7 +930,7 @@ struct ClipboardView: View {
                 .padding(.horizontal)
         }
         .padding(.top, contentTopPadding)
-        .padding(.bottom, 55)
+        .padding(.bottom, footerContentInset)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .animation(.spring(response: 0.3, dampingFraction: 0.8), value: showCategoryBar)
     }
@@ -932,10 +939,10 @@ struct ClipboardView: View {
         ScrollViewReader { proxy in
             ScrollView {
                 Color.clear
-                    .frame(height: 0)
+                    .frame(height: 1)
                     .id(ClipboardScrollTarget.top)
 
-                LazyVStack(spacing: isSelectMode ? 4 : 3) {
+                VStack(spacing: isSelectMode ? 4 : 3) {
                     // Scroll offset tracker
                     GeometryReader { geo in
                         Color.clear
@@ -946,40 +953,52 @@ struct ClipboardView: View {
                     ForEach(filteredItems) { item in
                         clipboardItemRow(for: item)
                             .id(item.id)
+                            .onGeometryChange(for: CGRect.self) { geometry in
+                                geometry.frame(in: .named("scroll"))
+                            } action: { frame in
+                                recordItemFrame(item.id, frame: frame)
+                            }
                             .transition(.asymmetric(
                                 insertion: .opacity.combined(with: .scale(scale: 0.96, anchor: .center)),
                                 removal: .opacity.combined(with: .scale(scale: 0.94, anchor: .center))
                             ))
                     }
                 }
-                .padding(.top, contentTopPadding) // Floating header + tab bar space
-                .padding(.bottom, 55) // Floating footer pill space
-                .padding(.horizontal, isSelectMode ? 0 : 8)
+                .frame(maxWidth: .infinity)
+                .padding(.bottom, footerContentInset) // Floating footer pill space
+                .padding(.leading, isSelectMode ? 0 : 16)
                 .animation(.spring(response: 0.25, dampingFraction: 0.75), value: filteredItems.map { $0.id })
                 .animation(.spring(response: 0.3, dampingFraction: 0.8), value: isSelectMode)
                 .animation(.spring(response: 0.3, dampingFraction: 0.8), value: showCategoryBar)
+
             }
+            .contentMargins(.top, contentTopPadding, for: .scrollContent)
             .contentMargins(.top, contentTopPadding, for: .scrollIndicators)
-            .contentMargins(.bottom, 55, for: .scrollIndicators)
+            .contentMargins(.bottom, footerContentInset, for: .scrollIndicators)
             .coordinateSpace(name: "scroll")
+            .onGeometryChange(for: CGFloat.self) { geometry in
+                geometry.size.height
+            } action: { height in
+                scrollViewportHeight = height
+            }
             .onPreferenceChange(ScrollOffsetPreferenceKey.self) { value in
                 handleScrollChange(newOffset: value)
             }
-            .onChange(of: scrollRequest) { _, request in
-                guard let request else { return }
-
-                let scroll = {
-                    if request.itemId == filteredItems.first?.id {
-                        proxy.scrollTo(ClipboardScrollTarget.top, anchor: .top)
-                    } else {
-                        proxy.scrollTo(request.itemId, anchor: .center)
+            .onChange(of: pendingScrollRequest) { _, request in
+                if let request {
+                    let itemId = request.itemId
+                    let scroll = {
+                        if itemId == filteredItems.first?.id {
+                            proxy.scrollTo(ClipboardScrollTarget.top, anchor: .top)
+                        } else {
+                            proxy.scrollTo(itemId, anchor: .top)
+                        }
                     }
-                }
-
-                if request.animated {
-                    withAnimation(keyboardScrollAnimation, scroll)
-                } else {
-                    scroll()
+                    if request.isAnimated {
+                        withAnimation(keyboardScrollAnimation, scroll)
+                    } else {
+                        scroll()
+                    }
                 }
             }
         }
@@ -1253,10 +1272,16 @@ struct ClipboardView: View {
         }
         // Up arrow: keyCode 126
         if keyCode == 126 {
+            if modifierFlags.contains(.command) {
+                return moveKeyboardSelectionToBoundary(selectLast: false)
+            }
             return moveKeyboardSelection(by: -1)
         }
         // Down arrow: keyCode 125
         if keyCode == 125 {
+            if modifierFlags.contains(.command) {
+                return moveKeyboardSelectionToBoundary(selectLast: true)
+            }
             return moveKeyboardSelection(by: 1)
         }
         // Return/Enter: keyCode 36, keypad enter: keyCode 76
@@ -1343,9 +1368,9 @@ struct ClipboardView: View {
         keyboardSelectedItemId = validId
         updateKeyboardHighlightExpansion(for: validId)
         if selectionChanged, let validId {
-            scrollRequest = ClipboardScrollRequest(itemId: validId, animated: false)
+            pendingScrollRequest = ClipboardScrollRequest(itemId: validId, isAnimated: false)
         } else if validId == nil {
-            scrollRequest = nil
+            pendingScrollRequest = nil
         }
     }
 
@@ -1362,9 +1387,12 @@ struct ClipboardView: View {
         lastMouseHoverLocation = nil
         updateKeyboardHighlightExpansion(for: initialId)
         if let initialId {
-            scrollRequest = ClipboardScrollRequest(itemId: initialId, animated: false)
+            pendingScrollRequest = ClipboardScrollRequest(
+                itemId: initialId,
+                isAnimated: false
+            )
         } else {
-            scrollRequest = nil
+            pendingScrollRequest = nil
         }
     }
 
@@ -1382,15 +1410,101 @@ struct ClipboardView: View {
             return false
         }
 
+        let currentId = keyboardSelectedItemId
+        let isWrapAround = (offset > 0 && currentId == itemIds.last && nextId == itemIds.first)
+            || (offset < 0 && currentId == itemIds.first && nextId == itemIds.last)
+        return selectKeyboardItem(
+            nextId,
+            animateScroll: !isWrapAround,
+            forceScroll: isWrapAround
+        )
+    }
+
+    @discardableResult
+    private func moveKeyboardSelectionToBoundary(selectLast: Bool) -> Bool {
+        guard let itemId = ClipboardKeyboardNavigation.boundarySelectionId(
+            itemIds: filteredItems.map(\.id),
+            selectLast: selectLast,
+            isQuickLookPresented: showQuickLook,
+            isQueueTabSelected: segmentedSelection == 2
+        ) else {
+            return false
+        }
+
+        return selectKeyboardItem(itemId, animateScroll: false, forceScroll: true)
+    }
+
+    @discardableResult
+    private func selectKeyboardItem(
+        _ itemId: UUID,
+        animateScroll: Bool = true,
+        forceScroll: Bool = false
+    ) -> Bool {
+        let needsScroll = forceScroll || !isItemFullyVisible(itemId)
+        let willExpand = filteredItems
+            .first(where: { $0.id == itemId })
+            .map(canExpandOnHover) == true
+        let waitsForExpandedGeometry = willExpand && expandableItemId != itemId
+        pendingExpansionVisibilityCheckItemId = waitsForExpandedGeometry ? itemId : nil
+        if !needsScroll || waitsForExpandedGeometry {
+            // Clear an older request before expansion geometry is reported so a
+            // new visibility correction cannot be overwritten afterward.
+            pendingScrollRequest = nil
+        }
         withAnimation(keyboardHighlightAnimation) {
-            keyboardSelectedItemId = nextId
-            hoveredItemId = nextId
+            keyboardSelectedItemId = itemId
+            hoveredItemId = itemId
             isKeyboardSelectionControllingHover = true
             lastMouseHoverLocation = nil
-            updateKeyboardHighlightExpansion(for: nextId)
+            updateKeyboardHighlightExpansion(for: itemId)
         }
-        scrollRequest = ClipboardScrollRequest(itemId: nextId, animated: true)
+        if needsScroll && !waitsForExpandedGeometry {
+            pendingScrollRequest = ClipboardScrollRequest(
+                itemId: itemId,
+                isAnimated: animateScroll
+            )
+        }
         return true
+    }
+
+    private func isItemFullyVisible(_ itemId: UUID) -> Bool {
+        guard
+            scrollViewportHeight > 0,
+            let frame = itemFrames[itemId]
+        else {
+            return false
+        }
+
+        let visibilityTolerance: CGFloat = 1
+        return frame.minY >= contentTopPadding - visibilityTolerance
+            && frame.maxY <= scrollViewportHeight - footerContentInset + visibilityTolerance
+    }
+
+    private func recordItemFrame(_ itemId: UUID, frame: CGRect) {
+        guard scrollViewportHeight > 0 else {
+            itemFrames[itemId] = frame
+            return
+        }
+
+        let visibleBottom = scrollViewportHeight - footerContentInset
+
+        if pendingExpansionVisibilityCheckItemId == itemId,
+           expandableItemId == itemId {
+            pendingExpansionVisibilityCheckItemId = nil
+            if frame.minY < contentTopPadding - 1 || frame.maxY > visibleBottom + 1 {
+                pendingScrollRequest = ClipboardScrollRequest(
+                    itemId: itemId,
+                    isAnimated: true
+                )
+            }
+        }
+
+        guard frame.maxY >= contentTopPadding, frame.minY <= visibleBottom else {
+            itemFrames.removeValue(forKey: itemId)
+            return
+        }
+
+        itemFrames[itemId] = frame
     }
 
     private func toggleSelection(for item: ClipboardItem) {
@@ -1447,7 +1561,7 @@ struct ClipboardView: View {
     private func updateKeyboardHighlightExpansion(for itemId: UUID?) {
         guard let itemId,
               let item = filteredItems.first(where: { $0.id == itemId }),
-              item.type == .url,
+              canExpandOnHover(item),
               !isScrolling else {
             expandableItemId = nil
             return
@@ -1515,7 +1629,7 @@ struct ClipboardView: View {
                     DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
                         if hoveredItemId == hovered && !isScrolling {
                             withAnimation(.easeOut(duration: 0.2)) {
-                                expandableItemId = hovered
+                                updateKeyboardHighlightExpansion(for: hovered)
                             }
                         }
                     }
@@ -1741,10 +1855,10 @@ struct ClipboardView: View {
                 ScrollViewReader { proxy in
                     ScrollView {
                         Color.clear
-                            .frame(height: 0)
+                            .frame(height: 1)
                             .id(ClipboardScrollTarget.pinnedTop)
 
-                        LazyVStack(spacing: 3) {
+                        VStack(spacing: 3) {
                             // Scroll offset tracker
                             GeometryReader { geo in
                                 Color.clear
@@ -1755,39 +1869,51 @@ struct ClipboardView: View {
                             ForEach(filteredItems) { item in
                                 clipboardItemRow(for: item)
                                     .id(item.id)
+                                    .onGeometryChange(for: CGRect.self) { geometry in
+                                        geometry.frame(in: .named("pinnedScroll"))
+                                    } action: { frame in
+                                        recordItemFrame(item.id, frame: frame)
+                                    }
                                     .transition(.asymmetric(
                                         insertion: .opacity.combined(with: .scale(scale: 0.96, anchor: .center)),
                                         removal: .opacity.combined(with: .scale(scale: 0.94, anchor: .center))
                                     ))
                             }
                         }
-                        .padding(.top, contentTopPadding) // Floating header + tab bar space
-                        .padding(.bottom, 55) // Floating footer pill space
-                        .padding(.horizontal, 8)
+                        .frame(maxWidth: .infinity)
+                        .padding(.bottom, footerContentInset) // Floating footer pill space
+                        .padding(.leading, 16)
                         .animation(.spring(response: 0.25, dampingFraction: 0.75), value: filteredItems.map { $0.id })
                         .animation(.spring(response: 0.3, dampingFraction: 0.8), value: showCategoryBar)
+
                     }
+                    .contentMargins(.top, contentTopPadding, for: .scrollContent)
                     .contentMargins(.top, contentTopPadding, for: .scrollIndicators)
-                    .contentMargins(.bottom, 55, for: .scrollIndicators)
+                    .contentMargins(.bottom, footerContentInset, for: .scrollIndicators)
                     .coordinateSpace(name: "pinnedScroll")
+                    .onGeometryChange(for: CGFloat.self) { geometry in
+                        geometry.size.height
+                    } action: { height in
+                        scrollViewportHeight = height
+                    }
                     .onPreferenceChange(ScrollOffsetPreferenceKey.self) { value in
                         handleScrollChange(newOffset: value)
                     }
-                    .onChange(of: scrollRequest) { _, request in
-                        guard let request else { return }
-
-                        let scroll = {
-                            if request.itemId == filteredItems.first?.id {
-                                proxy.scrollTo(ClipboardScrollTarget.pinnedTop, anchor: .top)
-                            } else {
-                                proxy.scrollTo(request.itemId, anchor: .center)
+                    .onChange(of: pendingScrollRequest) { _, request in
+                        if let request {
+                            let itemId = request.itemId
+                            let scroll = {
+                                if itemId == filteredItems.first?.id {
+                                    proxy.scrollTo(ClipboardScrollTarget.pinnedTop, anchor: .top)
+                                } else {
+                                    proxy.scrollTo(itemId, anchor: .top)
+                                }
                             }
-                        }
-
-                        if request.animated {
-                            withAnimation(keyboardScrollAnimation, scroll)
-                        } else {
-                            scroll()
+                            if request.isAnimated {
+                                withAnimation(keyboardScrollAnimation, scroll)
+                            } else {
+                                scroll()
+                            }
                         }
                     }
                 }
