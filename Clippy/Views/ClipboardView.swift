@@ -104,9 +104,9 @@ struct ClipboardView: View {
     @State private var isKeyboardSelectionControllingHover = false
     @State private var lastMouseHoverLocation: CGPoint? = nil
     @State private var pendingScrollRequest: ClipboardScrollRequest? = nil
+    @State private var pendingExpansionVisibilityCheckItemId: UUID? = nil
     @State private var itemFrames: [UUID: CGRect] = [:]
     @State private var scrollViewportHeight: CGFloat = 0
-    @State private var expansionAdjustmentItemId: UUID? = nil
     @State private var isClearing = false
     @State private var trashFilled = false
     @Environment(\.colorScheme) private var colorScheme
@@ -402,11 +402,6 @@ struct ClipboardView: View {
             let validIds = Set(itemIds)
             itemFrames = itemFrames.filter { validIds.contains($0.key) }
             ensureKeyboardSelectionIsValid()
-        }
-        .onChange(of: expandableItemId) { _, itemId in
-            if itemId == nil {
-                expansionAdjustmentItemId = nil
-            }
         }
     }
     
@@ -947,7 +942,7 @@ struct ClipboardView: View {
                     .frame(height: 1)
                     .id(ClipboardScrollTarget.top)
 
-                LazyVStack(spacing: isSelectMode ? 4 : 3) {
+                VStack(spacing: isSelectMode ? 4 : 3) {
                     // Scroll offset tracker
                     GeometryReader { geo in
                         Color.clear
@@ -969,8 +964,9 @@ struct ClipboardView: View {
                             ))
                     }
                 }
+                .frame(maxWidth: .infinity)
                 .padding(.bottom, footerContentInset) // Floating footer pill space
-                .padding(.horizontal, isSelectMode ? 0 : 8)
+                .padding(.leading, isSelectMode ? 0 : 16)
                 .animation(.spring(response: 0.25, dampingFraction: 0.75), value: filteredItems.map { $0.id })
                 .animation(.spring(response: 0.3, dampingFraction: 0.8), value: isSelectMode)
                 .animation(.spring(response: 0.3, dampingFraction: 0.8), value: showCategoryBar)
@@ -1002,11 +998,6 @@ struct ClipboardView: View {
                         withAnimation(keyboardScrollAnimation, scroll)
                     } else {
                         scroll()
-                        // A long jump can materialize a lazy row with a different
-                        // height than SwiftUI estimated. Re-align after that layout.
-                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
-                            scroll()
-                        }
                     }
                 }
             }
@@ -1450,53 +1441,30 @@ struct ClipboardView: View {
         forceScroll: Bool = false
     ) -> Bool {
         let needsScroll = forceScroll || !isItemFullyVisible(itemId)
-        expansionAdjustmentItemId = nil
+        let willExpand = filteredItems
+            .first(where: { $0.id == itemId })
+            .map(canExpandOnHover) == true
+        let waitsForExpandedGeometry = willExpand && expandableItemId != itemId
+        pendingExpansionVisibilityCheckItemId = waitsForExpandedGeometry ? itemId : nil
+        if !needsScroll || waitsForExpandedGeometry {
+            // Clear an older request before expansion geometry is reported so a
+            // new visibility correction cannot be overwritten afterward.
+            pendingScrollRequest = nil
+        }
         withAnimation(keyboardHighlightAnimation) {
             keyboardSelectedItemId = itemId
             hoveredItemId = itemId
             isKeyboardSelectionControllingHover = true
             lastMouseHoverLocation = nil
-            if needsScroll {
-                // Avoid changing the target row's height while ScrollViewReader is
-                // calculating a long-distance jump.
-                expandableItemId = nil
-            } else {
-                updateKeyboardHighlightExpansion(for: itemId)
-            }
+            updateKeyboardHighlightExpansion(for: itemId)
         }
-        if needsScroll {
+        if needsScroll && !waitsForExpandedGeometry {
             pendingScrollRequest = ClipboardScrollRequest(
                 itemId: itemId,
                 isAnimated: animateScroll
             )
-            restoreKeyboardExpansionAfterScroll(for: itemId)
-        } else {
-            pendingScrollRequest = nil
         }
         return true
-    }
-
-    private func restoreKeyboardExpansionAfterScroll(for itemId: UUID, attemptsRemaining: Int = 6) {
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
-            guard
-                keyboardSelectedItemId == itemId,
-                isKeyboardSelectionControllingHover
-            else {
-                return
-            }
-
-            if isScrolling, attemptsRemaining > 0 {
-                restoreKeyboardExpansionAfterScroll(
-                    for: itemId,
-                    attemptsRemaining: attemptsRemaining - 1
-                )
-                return
-            }
-
-            withAnimation(.easeOut(duration: 0.2)) {
-                updateKeyboardHighlightExpansion(for: itemId)
-            }
-        }
     }
 
     private func isItemFullyVisible(_ itemId: UUID) -> Bool {
@@ -1519,42 +1487,24 @@ struct ClipboardView: View {
         }
 
         let visibleBottom = scrollViewportHeight - footerContentInset
+
+        if pendingExpansionVisibilityCheckItemId == itemId,
+           expandableItemId == itemId {
+            pendingExpansionVisibilityCheckItemId = nil
+            if frame.minY < contentTopPadding - 1 || frame.maxY > visibleBottom + 1 {
+                pendingScrollRequest = ClipboardScrollRequest(
+                    itemId: itemId,
+                    isAnimated: true
+                )
+            }
+        }
+
         guard frame.maxY >= contentTopPadding, frame.minY <= visibleBottom else {
             itemFrames.removeValue(forKey: itemId)
             return
         }
 
         itemFrames[itemId] = frame
-
-        guard
-            itemId == keyboardSelectedItemId,
-            itemId == expandableItemId,
-            isKeyboardSelectionControllingHover,
-            frame.minY > contentTopPadding + 1,
-            frame.maxY > visibleBottom + 1,
-            expansionAdjustmentItemId != itemId
-        else {
-            return
-        }
-
-        expansionAdjustmentItemId = itemId
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
-            guard
-                keyboardSelectedItemId == itemId,
-                expandableItemId == itemId,
-                isKeyboardSelectionControllingHover,
-                let settledFrame = itemFrames[itemId],
-                settledFrame.minY > contentTopPadding + 1,
-                settledFrame.maxY > scrollViewportHeight - footerContentInset + 1
-            else {
-                return
-            }
-
-            pendingScrollRequest = ClipboardScrollRequest(
-                itemId: itemId,
-                isAnimated: false
-            )
-        }
     }
 
     private func toggleSelection(for item: ClipboardItem) {
@@ -1908,7 +1858,7 @@ struct ClipboardView: View {
                             .frame(height: 1)
                             .id(ClipboardScrollTarget.pinnedTop)
 
-                        LazyVStack(spacing: 3) {
+                        VStack(spacing: 3) {
                             // Scroll offset tracker
                             GeometryReader { geo in
                                 Color.clear
@@ -1930,8 +1880,9 @@ struct ClipboardView: View {
                                     ))
                             }
                         }
+                        .frame(maxWidth: .infinity)
                         .padding(.bottom, footerContentInset) // Floating footer pill space
-                        .padding(.horizontal, 8)
+                        .padding(.leading, 16)
                         .animation(.spring(response: 0.25, dampingFraction: 0.75), value: filteredItems.map { $0.id })
                         .animation(.spring(response: 0.3, dampingFraction: 0.8), value: showCategoryBar)
 
@@ -1962,11 +1913,6 @@ struct ClipboardView: View {
                                 withAnimation(keyboardScrollAnimation, scroll)
                             } else {
                                 scroll()
-                                // A long jump can materialize a lazy row with a
-                                // different height than SwiftUI estimated.
-                                DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
-                                    scroll()
-                                }
                             }
                         }
                     }
