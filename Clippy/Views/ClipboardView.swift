@@ -24,6 +24,12 @@ private enum ClipboardScrollTarget {
     static let pinnedTop = "clipboard-pinned-scroll-top"
 }
 
+private struct ClipboardScrollRequest: Equatable {
+    let itemId: UUID
+    let animated: Bool
+    private let nonce = UUID()
+}
+
 final class ClipboardHistoryKeyEvent {
     let keyCode: UInt16
     let modifierFlags: NSEvent.ModifierFlags
@@ -97,7 +103,7 @@ struct ClipboardView: View {
     @State private var keyboardSelectedItemId: UUID? = nil
     @State private var isKeyboardSelectionControllingHover = false
     @State private var lastMouseHoverLocation: CGPoint? = nil
-    @State private var pendingScrollItemId: UUID? = nil
+    @State private var scrollRequest: ClipboardScrollRequest? = nil
     @State private var isClearing = false
     @State private var trashFilled = false
     @Environment(\.colorScheme) private var colorScheme
@@ -958,15 +964,21 @@ struct ClipboardView: View {
             .onPreferenceChange(ScrollOffsetPreferenceKey.self) { value in
                 handleScrollChange(newOffset: value)
             }
-            .onChange(of: pendingScrollItemId) { _, itemId in
-                if let itemId = itemId {
-                    withAnimation(keyboardScrollAnimation) {
-                        if itemId == filteredItems.first?.id {
-                            proxy.scrollTo(ClipboardScrollTarget.top, anchor: .top)
-                        } else {
-                            proxy.scrollTo(itemId, anchor: .center)
-                        }
+            .onChange(of: scrollRequest) { _, request in
+                guard let request else { return }
+
+                let scroll = {
+                    if request.itemId == filteredItems.first?.id {
+                        proxy.scrollTo(ClipboardScrollTarget.top, anchor: .top)
+                    } else {
+                        proxy.scrollTo(request.itemId, anchor: .center)
                     }
+                }
+
+                if request.animated {
+                    withAnimation(keyboardScrollAnimation, scroll)
+                } else {
+                    scroll()
                 }
             }
         }
@@ -1325,10 +1337,15 @@ struct ClipboardView: View {
             itemIds: itemIds,
             isQueueTabSelected: segmentedSelection == 2
         )
+        let selectionChanged = keyboardSelectedItemId != validId
 
         keyboardSelectedItemId = validId
         updateKeyboardHighlightExpansion(for: validId)
-        pendingScrollItemId = validId
+        if selectionChanged, let validId {
+            scrollRequest = ClipboardScrollRequest(itemId: validId, animated: false)
+        } else if validId == nil {
+            scrollRequest = nil
+        }
     }
 
     private func resetActiveHighlightForPresentation() {
@@ -1343,7 +1360,11 @@ struct ClipboardView: View {
         isKeyboardSelectionControllingHover = true
         lastMouseHoverLocation = nil
         updateKeyboardHighlightExpansion(for: initialId)
-        pendingScrollItemId = nil
+        if let initialId {
+            scrollRequest = ClipboardScrollRequest(itemId: initialId, animated: false)
+        } else {
+            scrollRequest = nil
+        }
     }
 
     @discardableResult
@@ -1367,7 +1388,7 @@ struct ClipboardView: View {
             lastMouseHoverLocation = nil
             updateKeyboardHighlightExpansion(for: nextId)
         }
-        pendingScrollItemId = nextId
+        scrollRequest = ClipboardScrollRequest(itemId: nextId, animated: true)
         return true
     }
 
@@ -1751,15 +1772,21 @@ struct ClipboardView: View {
                     .onPreferenceChange(ScrollOffsetPreferenceKey.self) { value in
                         handleScrollChange(newOffset: value)
                     }
-                    .onChange(of: pendingScrollItemId) { _, itemId in
-                        if let itemId = itemId {
-                            withAnimation(keyboardScrollAnimation) {
-                                if itemId == filteredItems.first?.id {
-                                    proxy.scrollTo(ClipboardScrollTarget.pinnedTop, anchor: .top)
-                                } else {
-                                    proxy.scrollTo(itemId, anchor: .center)
-                                }
+                    .onChange(of: scrollRequest) { _, request in
+                        guard let request else { return }
+
+                        let scroll = {
+                            if request.itemId == filteredItems.first?.id {
+                                proxy.scrollTo(ClipboardScrollTarget.pinnedTop, anchor: .top)
+                            } else {
+                                proxy.scrollTo(request.itemId, anchor: .center)
                             }
+                        }
+
+                        if request.animated {
+                            withAnimation(keyboardScrollAnimation, scroll)
+                        } else {
+                            scroll()
                         }
                     }
                 }
