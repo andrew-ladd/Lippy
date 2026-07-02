@@ -27,7 +27,8 @@ private enum ClipboardScrollTarget {
 private struct ClipboardScrollRequest: Equatable {
     let itemId: UUID
     let animated: Bool
-    private let nonce = UUID()
+    // Included in Equatable synthesis to ensure repeated requests trigger `.onChange`.
+    private let requestId = UUID()
 }
 
 final class ClipboardHistoryKeyEvent {
