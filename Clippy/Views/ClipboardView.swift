@@ -1355,12 +1355,13 @@ struct ClipboardView: View {
             itemIds: itemIds,
             isQueueTabSelected: segmentedSelection == 2
         )
+        let selectionChanged = keyboardSelectedItemId != validId
 
         keyboardSelectedItemId = validId
         updateKeyboardHighlightExpansion(for: validId)
-        if let validId {
-            pendingScrollRequest = ClipboardScrollRequest(itemId: validId, isAnimated: true)
-        } else {
+        if selectionChanged, let validId {
+            pendingScrollRequest = ClipboardScrollRequest(itemId: validId, isAnimated: false)
+        } else if validId == nil {
             pendingScrollRequest = nil
         }
     }
