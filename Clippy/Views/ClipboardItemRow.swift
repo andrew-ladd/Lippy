@@ -9,7 +9,8 @@ import SwiftUI
 // Optimized ClipboardItemRow with better memory management
 struct ClipboardItemRow: View {
     let item: ClipboardItem
-    let isHovered: Bool
+    let isPointerHovered: Bool
+    let isKeyboardSelected: Bool
     let showFullContent: Bool
     @ObservedObject var clipboardManager: ClipboardManager
     @Environment(\.colorScheme) private var colorScheme
@@ -33,9 +34,17 @@ struct ClipboardItemRow: View {
         mainContent
             .padding(.vertical, 7)
             .padding(.horizontal, 8)
-            .modifier(GlassItemModifier(isHovered: isHovered))
-            .scaleEffect(isHovered && !usesCodeStyleRendering ? 1.01 : 1.0)
-            .animation(usesCodeStyleRendering ? nil : .easeOut(duration: 0.08), value: isHovered)
+            .modifier(
+                GlassItemModifier(
+                    isPointerHovered: isPointerHovered,
+                    isKeyboardSelected: isKeyboardSelected
+                )
+            )
+            .scaleEffect(isPointerHovered && !usesCodeStyleRendering ? 1.01 : 1.0)
+            .animation(
+                usesCodeStyleRendering ? nil : .easeOut(duration: 0.08),
+                value: isPointerHovered
+            )
             .frame(maxWidth: .infinity, alignment: .leading)
             .onDrag {
                 switch item.type {
@@ -96,7 +105,7 @@ struct ClipboardItemRow: View {
             }
             
             // Pin button on hover only with reduced size
-            if isHovered {
+            if isPointerHovered {
                 Button(action: { 
                     // Trigger iOS-style bounce
                     withAnimation(.spring(response: 0.25, dampingFraction: 0.4)) {

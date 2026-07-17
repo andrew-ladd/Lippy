@@ -27,7 +27,16 @@ private enum ClipboardScrollTarget {
 private struct ClipboardScrollRequest: Equatable {
     let id = UUID()
     let itemId: UUID
+    let edge: ClipboardKeyboardNavigation.ScrollEdge
     let isAnimated: Bool
+    let navigationGeneration: Int
+    let segment: Int
+}
+
+private struct ClipboardExpansionVisibilityCheck: Equatable {
+    let itemId: UUID
+    let navigationGeneration: Int
+    let segment: Int
 }
 
 final class ClipboardHistoryKeyEvent {
@@ -104,7 +113,12 @@ struct ClipboardView: View {
     @State private var isKeyboardSelectionControllingHover = false
     @State private var lastMouseHoverLocation: CGPoint? = nil
     @State private var pendingScrollRequest: ClipboardScrollRequest? = nil
-    @State private var pendingExpansionVisibilityCheckItemId: UUID? = nil
+    @State private var pendingExpansionVisibilityCheck: ClipboardExpansionVisibilityCheck? = nil
+    @State private var keyboardExpansionWorkItem: DispatchWorkItem? = nil
+    @State private var programmaticScrollEndWorkItem: DispatchWorkItem? = nil
+    @State private var isProgrammaticKeyboardScroll = false
+    @State private var activeProgrammaticScrollRequestId: UUID? = nil
+    @State private var keyboardNavigationGeneration = 0
     @State private var itemFrames: [UUID: CGRect] = [:]
     @State private var scrollViewportHeight: CGFloat = 0
     @State private var isClearing = false
@@ -135,7 +149,7 @@ struct ClipboardView: View {
     // Scroll-aware expansion tracking
     @State private var isScrolling = false
     @State private var scrollEndWorkItem: DispatchWorkItem? = nil
-    @State private var lastScrollOffset: CGFloat = 0
+    @State private var lastScrollOffset: CGFloat? = nil
     @State private var expandableItemId: UUID? = nil  // Only set when scroll stops + hover
 
     private let footerContentInset: CGFloat = 55
@@ -216,12 +230,8 @@ struct ClipboardView: View {
         isKeyboardSelectionControllingHover ? keyboardSelectedItemId : (hoveredItemId ?? keyboardSelectedItemId)
     }
 
-    private var keyboardHighlightAnimation: Animation {
-        .easeOut(duration: 0.06)
-    }
-
     private var keyboardScrollAnimation: Animation {
-        .easeOut(duration: 0.08)
+        .snappy(duration: 0.12, extraBounce: 0)
     }
     
     // Use a more efficient body implementation
@@ -375,6 +385,12 @@ struct ClipboardView: View {
                 NotificationCenter.default.removeObserver(monitor)
                 windowActivationMonitor = nil
             }
+            keyboardExpansionWorkItem?.cancel()
+            keyboardExpansionWorkItem = nil
+            programmaticScrollEndWorkItem?.cancel()
+            programmaticScrollEndWorkItem = nil
+            scrollEndWorkItem?.cancel()
+            scrollEndWorkItem = nil
         }
         // Monitor Queue Mode state changes reliably from the root view
         .onAppear {
@@ -395,13 +411,39 @@ struct ClipboardView: View {
             }
         }
         .onChange(of: segmentedSelection) {
+            keyboardNavigationGeneration += 1
+            cancelPendingKeyboardExpansion(collapseExpandedItem: true)
+            pendingScrollRequest = nil
+            programmaticScrollEndWorkItem?.cancel()
+            programmaticScrollEndWorkItem = nil
+            activeProgrammaticScrollRequestId = nil
+            isProgrammaticKeyboardScroll = false
+            scrollEndWorkItem?.cancel()
+            scrollEndWorkItem = nil
+            isScrolling = false
+            lastScrollOffset = nil
             itemFrames.removeAll(keepingCapacity: true)
             ensureKeyboardSelectionIsValid()
+            if isKeyboardSelectionControllingHover {
+                scheduleKeyboardExpansion(
+                    for: keyboardSelectedItemId,
+                    navigationGeneration: keyboardNavigationGeneration
+                )
+            }
         }
         .onChange(of: filteredItems.map { $0.id }) { _, itemIds in
+            keyboardNavigationGeneration += 1
+            cancelPendingKeyboardExpansion(collapseExpandedItem: true)
+            pendingScrollRequest = nil
             let validIds = Set(itemIds)
             itemFrames = itemFrames.filter { validIds.contains($0.key) }
             ensureKeyboardSelectionIsValid()
+            if isKeyboardSelectionControllingHover {
+                scheduleKeyboardExpansion(
+                    for: keyboardSelectedItemId,
+                    navigationGeneration: keyboardNavigationGeneration
+                )
+            }
         }
     }
     
@@ -965,7 +1007,6 @@ struct ClipboardView: View {
                     }
                 }
                 .frame(maxWidth: .infinity)
-                .padding(.bottom, footerContentInset) // Floating footer pill space
                 .padding(.leading, isSelectMode ? 0 : 16)
                 .animation(.spring(response: 0.25, dampingFraction: 0.75), value: filteredItems.map { $0.id })
                 .animation(.spring(response: 0.3, dampingFraction: 0.8), value: isSelectMode)
@@ -973,6 +1014,7 @@ struct ClipboardView: View {
 
             }
             .contentMargins(.top, contentTopPadding, for: .scrollContent)
+            .contentMargins(.bottom, footerContentInset, for: .scrollContent)
             .contentMargins(.top, contentTopPadding, for: .scrollIndicators)
             .contentMargins(.bottom, footerContentInset, for: .scrollIndicators)
             .coordinateSpace(name: "scroll")
@@ -985,19 +1027,30 @@ struct ClipboardView: View {
                 handleScrollChange(newOffset: value)
             }
             .onChange(of: pendingScrollRequest) { _, request in
-                if let request {
+                if let request,
+                   request.segment == segmentedSelection,
+                   request.navigationGeneration == keyboardNavigationGeneration {
                     let itemId = request.itemId
+                    beginProgrammaticKeyboardScroll(requestId: request.id)
                     let scroll = {
-                        if itemId == filteredItems.first?.id {
-                            proxy.scrollTo(ClipboardScrollTarget.top, anchor: .top)
-                        } else {
-                            proxy.scrollTo(itemId, anchor: .top)
+                        switch request.edge {
+                        case .top:
+                            if itemId == filteredItems.first?.id {
+                                proxy.scrollTo(ClipboardScrollTarget.top, anchor: .top)
+                            } else {
+                                proxy.scrollTo(itemId, anchor: .top)
+                            }
+                        case .bottom:
+                            proxy.scrollTo(itemId, anchor: .bottom)
                         }
                     }
                     if request.isAnimated {
                         withAnimation(keyboardScrollAnimation, scroll)
                     } else {
                         scroll()
+                    }
+                    if pendingScrollRequest?.id == request.id {
+                        pendingScrollRequest = nil
                     }
                 }
             }
@@ -1031,7 +1084,9 @@ struct ClipboardView: View {
             
             ClipboardItemRow(
                 item: item,
-                isHovered: activeHoverItemId == item.id,
+                isPointerHovered: !isKeyboardSelectionControllingHover && hoveredItemId == item.id,
+                isKeyboardSelected: keyboardSelectedItemId == item.id
+                    && (isKeyboardSelectionControllingHover || hoveredItemId == nil),
                 showFullContent: expandableItemId == item.id,
                 clipboardManager: clipboardManager
             )
@@ -1238,13 +1293,17 @@ struct ClipboardView: View {
         clipboardManager.copyItemToPasteboard(item)
 
         if shouldAutoPasteAfterCopying {
+            guard appDelegate.requestPasteAutomationAccessForPasting() else {
+                return
+            }
+
             pendingPasteWorkItem?.cancel()
             appDelegate.dismissFloatingWindowForPaste {
                 let pasteWorkItem = DispatchWorkItem {
-                    simulatePaste()
+                    appDelegate.pasteClipboardIntoTargetApplication(text: item.text)
                 }
                 pendingPasteWorkItem = pasteWorkItem
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.15, execute: pasteWorkItem)
+                DispatchQueue.main.async(execute: pasteWorkItem)
             }
         } else {
             closeWindow()
@@ -1366,9 +1425,22 @@ struct ClipboardView: View {
         let selectionChanged = keyboardSelectedItemId != validId
 
         keyboardSelectedItemId = validId
-        updateKeyboardHighlightExpansion(for: validId)
+        if selectionChanged {
+            keyboardNavigationGeneration += 1
+            cancelPendingKeyboardExpansion(collapseExpandedItem: true)
+            scheduleKeyboardExpansion(
+                for: validId,
+                navigationGeneration: keyboardNavigationGeneration
+            )
+        }
         if selectionChanged, let validId {
-            pendingScrollRequest = ClipboardScrollRequest(itemId: validId, isAnimated: false)
+            pendingScrollRequest = ClipboardScrollRequest(
+                itemId: validId,
+                edge: .top,
+                isAnimated: false,
+                navigationGeneration: keyboardNavigationGeneration,
+                segment: segmentedSelection
+            )
         } else if validId == nil {
             pendingScrollRequest = nil
         }
@@ -1382,14 +1454,23 @@ struct ClipboardView: View {
         )
 
         hoveredItemId = nil
+        lastScrollOffset = nil
+        keyboardNavigationGeneration += 1
+        cancelPendingKeyboardExpansion(collapseExpandedItem: true)
         keyboardSelectedItemId = initialId
         isKeyboardSelectionControllingHover = true
         lastMouseHoverLocation = nil
-        updateKeyboardHighlightExpansion(for: initialId)
+        scheduleKeyboardExpansion(
+            for: initialId,
+            navigationGeneration: keyboardNavigationGeneration
+        )
         if let initialId {
             pendingScrollRequest = ClipboardScrollRequest(
                 itemId: initialId,
-                isAnimated: false
+                edge: .top,
+                isAnimated: false,
+                navigationGeneration: keyboardNavigationGeneration,
+                segment: segmentedSelection
             )
         } else {
             pendingScrollRequest = nil
@@ -1413,11 +1494,11 @@ struct ClipboardView: View {
         let currentId = keyboardSelectedItemId
         let isWrapAround = (offset > 0 && currentId == itemIds.last && nextId == itemIds.first)
             || (offset < 0 && currentId == itemIds.first && nextId == itemIds.last)
-        return selectKeyboardItem(
-            nextId,
-            animateScroll: !isWrapAround,
-            forceScroll: isWrapAround
-        )
+        let destinationEdge: ClipboardKeyboardNavigation.ScrollEdge = offset > 0 ? .bottom : .top
+        let intent: ClipboardKeyboardNavigation.ScrollIntent = isWrapAround
+            ? .wrap(to: destinationEdge)
+            : .movement(offset > 0 ? .down : .up)
+        return selectKeyboardItem(nextId, scrollIntent: intent)
     }
 
     @discardableResult
@@ -1431,53 +1512,48 @@ struct ClipboardView: View {
             return false
         }
 
-        return selectKeyboardItem(itemId, animateScroll: false, forceScroll: true)
+        return selectKeyboardItem(
+            itemId,
+            scrollIntent: .boundary(selectLast ? .bottom : .top)
+        )
     }
 
     @discardableResult
     private func selectKeyboardItem(
         _ itemId: UUID,
-        animateScroll: Bool = true,
-        forceScroll: Bool = false
+        scrollIntent: ClipboardKeyboardNavigation.ScrollIntent
     ) -> Bool {
-        let needsScroll = forceScroll || !isItemFullyVisible(itemId)
-        let willExpand = filteredItems
-            .first(where: { $0.id == itemId })
-            .map(canExpandOnHover) == true
-        let waitsForExpandedGeometry = willExpand && expandableItemId != itemId
-        pendingExpansionVisibilityCheckItemId = waitsForExpandedGeometry ? itemId : nil
-        if !needsScroll || waitsForExpandedGeometry {
-            // Clear an older request before expansion geometry is reported so a
-            // new visibility correction cannot be overwritten afterward.
-            pendingScrollRequest = nil
-        }
-        withAnimation(keyboardHighlightAnimation) {
-            keyboardSelectedItemId = itemId
-            hoveredItemId = itemId
-            isKeyboardSelectionControllingHover = true
-            lastMouseHoverLocation = nil
-            updateKeyboardHighlightExpansion(for: itemId)
-        }
-        if needsScroll && !waitsForExpandedGeometry {
+        let targetFrame = scrollViewportHeight > 0 ? itemFrames[itemId] : nil
+        let scrollDecision = ClipboardKeyboardNavigation.scrollDecision(
+            targetFrame: targetFrame,
+            visibleTop: contentTopPadding,
+            visibleBottom: scrollViewportHeight - footerContentInset,
+            intent: scrollIntent
+        )
+
+        keyboardNavigationGeneration += 1
+        let navigationGeneration = keyboardNavigationGeneration
+        cancelPendingKeyboardExpansion(collapseExpandedItem: true)
+        pendingExpansionVisibilityCheck = nil
+        pendingScrollRequest = nil
+        keyboardSelectedItemId = itemId
+        isKeyboardSelectionControllingHover = true
+        lastMouseHoverLocation = nil
+
+        if case let .scroll(edge, animated) = scrollDecision {
             pendingScrollRequest = ClipboardScrollRequest(
                 itemId: itemId,
-                isAnimated: animateScroll
+                edge: edge,
+                isAnimated: animated,
+                navigationGeneration: navigationGeneration,
+                segment: segmentedSelection
             )
         }
+        scheduleKeyboardExpansion(
+            for: itemId,
+            navigationGeneration: navigationGeneration
+        )
         return true
-    }
-
-    private func isItemFullyVisible(_ itemId: UUID) -> Bool {
-        guard
-            scrollViewportHeight > 0,
-            let frame = itemFrames[itemId]
-        else {
-            return false
-        }
-
-        let visibilityTolerance: CGFloat = 1
-        return frame.minY >= contentTopPadding - visibilityTolerance
-            && frame.maxY <= scrollViewportHeight - footerContentInset + visibilityTolerance
     }
 
     private func recordItemFrame(_ itemId: UUID, frame: CGRect) {
@@ -1488,13 +1564,29 @@ struct ClipboardView: View {
 
         let visibleBottom = scrollViewportHeight - footerContentInset
 
-        if pendingExpansionVisibilityCheckItemId == itemId,
+        if let visibilityCheck = pendingExpansionVisibilityCheck,
+           visibilityCheck.itemId == itemId,
+           visibilityCheck.navigationGeneration == keyboardNavigationGeneration,
+           visibilityCheck.segment == segmentedSelection,
            expandableItemId == itemId {
-            pendingExpansionVisibilityCheckItemId = nil
-            if frame.minY < contentTopPadding - 1 || frame.maxY > visibleBottom + 1 {
+            let intent: ClipboardKeyboardNavigation.ScrollIntent =
+                frame.minY < contentTopPadding - 1 ? .movement(.up) : .movement(.down)
+            if case let .scroll(_, animated) = ClipboardKeyboardNavigation.scrollDecision(
+                targetFrame: frame,
+                visibleTop: contentTopPadding,
+                visibleBottom: visibleBottom,
+                intent: intent
+            ) {
+                pendingExpansionVisibilityCheck = nil
                 pendingScrollRequest = ClipboardScrollRequest(
                     itemId: itemId,
-                    isAnimated: true
+                    // Bottom alignment puts the expanded card behind the floating
+                    // footer. Once expansion overflows, move the whole card into
+                    // the unobstructed viewport instead.
+                    edge: .top,
+                    isAnimated: animated,
+                    navigationGeneration: visibilityCheck.navigationGeneration,
+                    segment: visibilityCheck.segment
                 )
             }
         }
@@ -1523,15 +1615,16 @@ struct ClipboardView: View {
             return
         }
 
-        withAnimation(.easeInOut(duration: 0.15)) {
-            if isHovered {
-                isKeyboardSelectionControllingHover = false
-                hoveredItemId = item.id
-                keyboardSelectedItemId = item.id
-                lastMouseHoverLocation = NSEvent.mouseLocation
-            } else if hoveredItemId == item.id {
-                hoveredItemId = nil
-            }
+        if isHovered {
+            keyboardNavigationGeneration += 1
+            cancelPendingKeyboardExpansion(collapseExpandedItem: true)
+            pendingScrollRequest = nil
+            isKeyboardSelectionControllingHover = false
+            hoveredItemId = item.id
+            keyboardSelectedItemId = item.id
+            lastMouseHoverLocation = NSEvent.mouseLocation
+        } else if hoveredItemId == item.id {
+            hoveredItemId = nil
         }
         
         // Only allow expansion when NOT scrolling
@@ -1539,7 +1632,10 @@ struct ClipboardView: View {
             // Small delay before expanding to avoid flicker
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
                 // Check we're still hovering the same item and still not scrolling
-                if hoveredItemId == item.id && !isScrolling && canExpandOnHover(item) {
+                if !isKeyboardSelectionControllingHover,
+                   hoveredItemId == item.id,
+                   !isScrolling,
+                   canExpandOnHover(item) {
                     withAnimation(.easeOut(duration: 0.2)) {
                         expandableItemId = item.id
                     }
@@ -1558,16 +1654,51 @@ struct ClipboardView: View {
         item.detectedLanguage == nil && (item.type == .url || !isCodeStyleURL(item))
     }
 
-    private func updateKeyboardHighlightExpansion(for itemId: UUID?) {
-        guard let itemId,
-              let item = filteredItems.first(where: { $0.id == itemId }),
-              canExpandOnHover(item),
-              !isScrolling else {
+    private func cancelPendingKeyboardExpansion(collapseExpandedItem: Bool) {
+        keyboardExpansionWorkItem?.cancel()
+        keyboardExpansionWorkItem = nil
+        pendingExpansionVisibilityCheck = nil
+        if collapseExpandedItem {
             expandableItemId = nil
-            return
         }
+    }
 
-        expandableItemId = item.id
+    private func scheduleKeyboardExpansion(
+        for itemId: UUID?,
+        navigationGeneration: Int,
+        delay: TimeInterval = 0.12
+    ) {
+        keyboardExpansionWorkItem?.cancel()
+        keyboardExpansionWorkItem = nil
+
+        guard let itemId else { return }
+        let segment = segmentedSelection
+        let workItem = DispatchWorkItem { [self] in
+            guard
+                keyboardNavigationGeneration == navigationGeneration,
+                segmentedSelection == segment,
+                keyboardSelectedItemId == itemId,
+                isKeyboardSelectionControllingHover,
+                !isScrolling,
+                !isProgrammaticKeyboardScroll,
+                let item = filteredItems.first(where: { $0.id == itemId }),
+                canExpandOnHover(item)
+            else {
+                return
+            }
+
+            pendingExpansionVisibilityCheck = ClipboardExpansionVisibilityCheck(
+                itemId: itemId,
+                navigationGeneration: navigationGeneration,
+                segment: segment
+            )
+            withAnimation(.easeOut(duration: 0.11)) {
+                expandableItemId = itemId
+            }
+            keyboardExpansionWorkItem = nil
+        }
+        keyboardExpansionWorkItem = workItem
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: workItem)
     }
 
     private func isCodeStyleURL(_ item: ClipboardItem) -> Bool {
@@ -1592,19 +1723,57 @@ struct ClipboardView: View {
         let deltaY = mouseLocation.y - lastLocation.y
         guard hypot(deltaX, deltaY) > 1.5 else { return }
 
+        keyboardNavigationGeneration += 1
+        cancelPendingKeyboardExpansion(collapseExpandedItem: true)
+        pendingScrollRequest = nil
+        isKeyboardSelectionControllingHover = false
+        lastMouseHoverLocation = mouseLocation
+        hoveredItemId = item.id
+        keyboardSelectedItemId = item.id
         withAnimation(.easeOut(duration: 0.08)) {
-            isKeyboardSelectionControllingHover = false
-            lastMouseHoverLocation = mouseLocation
-            hoveredItemId = item.id
-            keyboardSelectedItemId = item.id
             expandableItemId = !isScrolling && canExpandOnHover(item) ? item.id : nil
         }
+    }
+
+    private func beginProgrammaticKeyboardScroll(requestId: UUID) {
+        activeProgrammaticScrollRequestId = requestId
+        isProgrammaticKeyboardScroll = true
+        scheduleProgrammaticKeyboardScrollEnd(requestId: requestId)
+    }
+
+    private func scheduleProgrammaticKeyboardScrollEnd(requestId: UUID) {
+        programmaticScrollEndWorkItem?.cancel()
+        let workItem = DispatchWorkItem { [self] in
+            guard activeProgrammaticScrollRequestId == requestId else { return }
+            activeProgrammaticScrollRequestId = nil
+            isProgrammaticKeyboardScroll = false
+            programmaticScrollEndWorkItem = nil
+            if isKeyboardSelectionControllingHover {
+                scheduleKeyboardExpansion(
+                    for: keyboardSelectedItemId,
+                    navigationGeneration: keyboardNavigationGeneration
+                )
+            }
+        }
+        programmaticScrollEndWorkItem = workItem
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.10, execute: workItem)
     }
     
     // Called when scroll offset changes to detect scrolling
     private func handleScrollChange(newOffset: CGFloat) {
-        let delta = abs(newOffset - lastScrollOffset)
+        guard let previousOffset = lastScrollOffset else {
+            lastScrollOffset = newOffset
+            return
+        }
+        let delta = abs(newOffset - previousOffset)
         lastScrollOffset = newOffset
+
+        if let requestId = activeProgrammaticScrollRequestId {
+            if delta > 0.1 {
+                scheduleProgrammaticKeyboardScrollEnd(requestId: requestId)
+            }
+            return
+        }
         
         // Only consider it scrolling if there's meaningful movement
         if delta > 1 {
@@ -1613,30 +1782,31 @@ struct ClipboardView: View {
             
             // Mark as scrolling and collapse any expanded item
             if !isScrolling {
+                keyboardNavigationGeneration += 1
+                cancelPendingKeyboardExpansion(collapseExpandedItem: true)
+                pendingScrollRequest = nil
                 isScrolling = true
-                withAnimation(.easeOut(duration: 0.1)) {
-                    expandableItemId = nil
-                }
             }
             
             // Schedule "scroll ended" detection
             let workItem = DispatchWorkItem { [self] in
-                withAnimation(.easeOut(duration: 0.2)) {
-                    isScrolling = false
-                }
-                // If still hovering an item after scroll stops, expand it
-                if let hovered = hoveredItemId {
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
-                        if hoveredItemId == hovered && !isScrolling {
-                            withAnimation(.easeOut(duration: 0.2)) {
-                                updateKeyboardHighlightExpansion(for: hovered)
-                            }
-                        }
+                isScrolling = false
+                if isKeyboardSelectionControllingHover {
+                    scheduleKeyboardExpansion(
+                        for: keyboardSelectedItemId,
+                        navigationGeneration: keyboardNavigationGeneration
+                    )
+                } else if let hovered = hoveredItemId,
+                          let item = filteredItems.first(where: { $0.id == hovered }),
+                          canExpandOnHover(item) {
+                    withAnimation(.easeOut(duration: 0.11)) {
+                        expandableItemId = hovered
                     }
                 }
+                scrollEndWorkItem = nil
             }
             scrollEndWorkItem = workItem
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.15, execute: workItem)
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.10, execute: workItem)
         }
     }
     
@@ -1823,19 +1993,6 @@ struct ClipboardView: View {
         appDelegate.closeFloatingWindow()
     }
     
-    // Optimized paste simulation
-    private func simulatePaste() {
-        DispatchQueue.global(qos: .userInteractive).async {
-            let source = CGEventSource(stateID: .hidSystemState)
-            let keyDown = CGEvent(keyboardEventSource: source, virtualKey: 0x09, keyDown: true)
-            keyDown?.flags = .maskCommand
-            let keyUp = CGEvent(keyboardEventSource: source, virtualKey: 0x09, keyDown: false)
-            
-            keyDown?.post(tap: .cghidEventTap)
-            keyUp?.post(tap: .cghidEventTap)
-        }
-    }
-    
     // The initializer should be public (implicitly) - make sure there's no private modifier
     // If you have an init method, ensure it doesn't have 'private' before it
     init(clipboardManager: ClipboardManager) {
@@ -1881,13 +2038,13 @@ struct ClipboardView: View {
                             }
                         }
                         .frame(maxWidth: .infinity)
-                        .padding(.bottom, footerContentInset) // Floating footer pill space
                         .padding(.leading, 16)
                         .animation(.spring(response: 0.25, dampingFraction: 0.75), value: filteredItems.map { $0.id })
                         .animation(.spring(response: 0.3, dampingFraction: 0.8), value: showCategoryBar)
 
                     }
                     .contentMargins(.top, contentTopPadding, for: .scrollContent)
+                    .contentMargins(.bottom, footerContentInset, for: .scrollContent)
                     .contentMargins(.top, contentTopPadding, for: .scrollIndicators)
                     .contentMargins(.bottom, footerContentInset, for: .scrollIndicators)
                     .coordinateSpace(name: "pinnedScroll")
@@ -1900,19 +2057,30 @@ struct ClipboardView: View {
                         handleScrollChange(newOffset: value)
                     }
                     .onChange(of: pendingScrollRequest) { _, request in
-                        if let request {
+                        if let request,
+                           request.segment == segmentedSelection,
+                           request.navigationGeneration == keyboardNavigationGeneration {
                             let itemId = request.itemId
+                            beginProgrammaticKeyboardScroll(requestId: request.id)
                             let scroll = {
-                                if itemId == filteredItems.first?.id {
-                                    proxy.scrollTo(ClipboardScrollTarget.pinnedTop, anchor: .top)
-                                } else {
-                                    proxy.scrollTo(itemId, anchor: .top)
+                                switch request.edge {
+                                case .top:
+                                    if itemId == filteredItems.first?.id {
+                                        proxy.scrollTo(ClipboardScrollTarget.pinnedTop, anchor: .top)
+                                    } else {
+                                        proxy.scrollTo(itemId, anchor: .top)
+                                    }
+                                case .bottom:
+                                    proxy.scrollTo(itemId, anchor: .bottom)
                                 }
                             }
                             if request.isAnimated {
                                 withAnimation(keyboardScrollAnimation, scroll)
                             } else {
                                 scroll()
+                            }
+                            if pendingScrollRequest?.id == request.id {
+                                pendingScrollRequest = nil
                             }
                         }
                     }

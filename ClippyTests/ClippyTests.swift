@@ -249,4 +249,110 @@ struct ClipboardKeyboardNavigationTests {
         #expect(queueId == nil)
         #expect(quickLookId == nil)
     }
+
+    @Test func visibleKeyboardTargetDoesNotScroll() {
+        let decision = ClipboardKeyboardNavigation.scrollDecision(
+            targetFrame: CGRect(x: 0, y: 120, width: 300, height: 40),
+            visibleTop: 100,
+            visibleBottom: 300,
+            intent: .movement(.down)
+        )
+
+        #expect(decision == .noScroll)
+    }
+
+    @Test func targetAboveViewportScrollsToTop() {
+        let decision = ClipboardKeyboardNavigation.scrollDecision(
+            targetFrame: CGRect(x: 0, y: 70, width: 300, height: 40),
+            visibleTop: 100,
+            visibleBottom: 300,
+            intent: .movement(.up)
+        )
+
+        #expect(decision == .scroll(to: .top, animated: true))
+    }
+
+    @Test func targetBelowViewportScrollsToBottom() {
+        let decision = ClipboardKeyboardNavigation.scrollDecision(
+            targetFrame: CGRect(x: 0, y: 280, width: 300, height: 40),
+            visibleTop: 100,
+            visibleBottom: 300,
+            intent: .movement(.down)
+        )
+
+        #expect(decision == .scroll(to: .bottom, animated: true))
+    }
+
+    @Test func unknownTargetFrameUsesMovementDirection() {
+        let upwardDecision = ClipboardKeyboardNavigation.scrollDecision(
+            targetFrame: nil,
+            visibleTop: 100,
+            visibleBottom: 300,
+            intent: .movement(.up)
+        )
+        let downwardDecision = ClipboardKeyboardNavigation.scrollDecision(
+            targetFrame: nil,
+            visibleTop: 100,
+            visibleBottom: 300,
+            intent: .movement(.down)
+        )
+
+        #expect(upwardDecision == .scroll(to: .top, animated: true))
+        #expect(downwardDecision == .scroll(to: .bottom, animated: true))
+    }
+
+    @Test func wrapScrollsToDestinationEdgeWithoutAnimation() {
+        let toFirstDecision = ClipboardKeyboardNavigation.scrollDecision(
+            targetFrame: nil,
+            visibleTop: 100,
+            visibleBottom: 300,
+            intent: .wrap(to: .top)
+        )
+        let toLastDecision = ClipboardKeyboardNavigation.scrollDecision(
+            targetFrame: nil,
+            visibleTop: 100,
+            visibleBottom: 300,
+            intent: .wrap(to: .bottom)
+        )
+
+        #expect(toFirstDecision == .scroll(to: .top, animated: false))
+        #expect(toLastDecision == .scroll(to: .bottom, animated: false))
+    }
+
+    @Test func boundaryScrollsToRequestedEdgeWithoutAnimation() {
+        let firstDecision = ClipboardKeyboardNavigation.scrollDecision(
+            targetFrame: nil,
+            visibleTop: 100,
+            visibleBottom: 300,
+            intent: .boundary(.top)
+        )
+        let lastDecision = ClipboardKeyboardNavigation.scrollDecision(
+            targetFrame: nil,
+            visibleTop: 100,
+            visibleBottom: 300,
+            intent: .boundary(.bottom)
+        )
+
+        #expect(firstDecision == .scroll(to: .top, animated: false))
+        #expect(lastDecision == .scroll(to: .bottom, animated: false))
+    }
+
+    @Test func visibleWrapAndBoundaryTargetsStillHonorDestinationEdge() {
+        let visibleFrame = CGRect(x: 0, y: 120, width: 300, height: 40)
+        let wrapDecision = ClipboardKeyboardNavigation.scrollDecision(
+            targetFrame: visibleFrame,
+            visibleTop: 100,
+            visibleBottom: 300,
+            intent: .wrap(to: .top)
+        )
+        let boundaryDecision = ClipboardKeyboardNavigation.scrollDecision(
+            targetFrame: visibleFrame,
+            visibleTop: 100,
+            visibleBottom: 300,
+            intent: .boundary(.bottom)
+        )
+
+        #expect(wrapDecision == .scroll(to: .top, animated: false))
+        #expect(boundaryDecision == .scroll(to: .bottom, animated: false))
+    }
 }

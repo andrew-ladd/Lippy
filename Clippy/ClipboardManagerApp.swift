@@ -59,6 +59,7 @@ class ClipboardAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, O
     private var settingsWindow: NSPanel? // Track the settings window
     private var isShowingFloatingWindow = false
     private var closingWindowIDs = Set<ObjectIdentifier>()
+    private var pasteTargetApplication: NSRunningApplication?
     
     // Keys for saving window positions
     private let floatingWindowPositionKey = "FloatingWindowPosition"
@@ -130,6 +131,13 @@ class ClipboardAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, O
         
         // Always create status bar item regardless of preference, since we're a menu bar app
         setupStatusBarItem()
+
+        NSWorkspace.shared.notificationCenter.addObserver(
+            self,
+            selector: #selector(handleAppActivationChange),
+            name: NSWorkspace.didActivateApplicationNotification,
+            object: nil
+        )
         
         // Set up keyboard shortcut manager with user preferences
         let key = UserDefaults.standard.integer(forKey: "clipboardShortcutKey")
@@ -254,7 +262,7 @@ class ClipboardAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, O
     
     private func showAccessibilityPermissionAlertIfNeeded() {
         let forceAccessibilityAlert = ProcessInfo.processInfo.environment["CLIPPY_FORCE_ACCESSIBILITY_ALERT"] == "1"
-        guard forceAccessibilityAlert || !AXIsProcessTrusted() else {
+        guard forceAccessibilityAlert || !(AXIsProcessTrusted() || CGPreflightPostEventAccess()) else {
             return
         }
         
@@ -262,8 +270,8 @@ class ClipboardAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, O
         NSApp.activate(ignoringOtherApps: true)
         
         let alert = NSAlert()
-        alert.messageText = "Accessibility Permissions Required"
-        alert.informativeText = "Please grant Accessibility access in System Settings → Privacy & Security → Accessibility to enable keyboard shortcuts. If Clippy does not appear in the list, add Clippy.app manually with the + button."
+        alert.messageText = "Automatic Paste Permission Required"
+        alert.informativeText = "Please allow Clippy in System Settings → Privacy & Security → Accessibility so it can automatically send ⌘V after you select a clipboard item."
         alert.alertStyle = .warning
         alert.addButton(withTitle: "Open System Settings")
         alert.addButton(withTitle: "Later")
@@ -617,6 +625,7 @@ class ClipboardAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, O
     }
     
     @objc func showFloatingWindow() {
+        rememberPasteTargetApplication()
         prepareToShowUserFacingWindow()
         
         // If the window already exists, just bring it to front and return
@@ -688,14 +697,6 @@ class ClipboardAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, O
         
         // Set this window to be not movable by background
         window.isMovableByWindowBackground = false
-        
-        // Add a notification observer for when Spotlight activates or deactivates
-        NotificationCenter.default.addObserver(
-            self,
-            selector: #selector(handleAppActivationChange),
-            name: NSWorkspace.didActivateApplicationNotification,
-            object: nil
-        )
         
         // Make window appear with a nice animation - use popover style for modern feel
         window.animationBehavior = .utilityWindow
@@ -1294,7 +1295,7 @@ class ClipboardAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, O
         }
 
         guard let window = floatingWindow else {
-            completion()
+            restorePasteTargetApplication(completion: completion)
             return
         }
 
@@ -1310,8 +1311,315 @@ class ClipboardAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, O
         }, completionHandler: {
             window.orderOut(nil)
             window.alphaValue = 0.98
-            completion()
+            self.restorePasteTargetApplication(completion: completion)
         })
+    }
+
+    private func rememberPasteTargetApplication() {
+        guard let frontmostApplication = NSWorkspace.shared.frontmostApplication,
+              frontmostApplication.processIdentifier != ProcessInfo.processInfo.processIdentifier else {
+            return
+        }
+
+        pasteTargetApplication = frontmostApplication
+    }
+
+    private func restorePasteTargetApplication(completion: @escaping () -> Void) {
+        guard let pasteTargetApplication, !pasteTargetApplication.isTerminated else {
+            completion()
+            return
+        }
+
+        pasteTargetApplication.activate(options: [])
+        completion()
+    }
+
+    func pasteClipboardIntoTargetApplication(text: String?) {
+        guard let pasteTargetApplication,
+              !pasteTargetApplication.isTerminated else {
+            return
+        }
+
+        pasteTargetApplication.activate(options: [])
+        pasteWhenTargetIsActive(
+            pasteTargetApplication,
+            text: text,
+            attemptsRemaining: 20
+        )
+    }
+
+    private func pasteWhenTargetIsActive(
+        _ application: NSRunningApplication,
+        text: String?,
+        attemptsRemaining: Int
+    ) {
+        let targetIsActive = NSWorkspace.shared.frontmostApplication?.processIdentifier == application.processIdentifier
+        if !targetIsActive && attemptsRemaining > 0 {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.01) { [weak self] in
+                self?.pasteWhenTargetIsActive(
+                    application,
+                    text: text,
+                    attemptsRemaining: attemptsRemaining - 1
+                )
+            }
+            return
+        }
+
+        // didActivateApplication can arrive just before the target has restored
+        // its key window/first responder. A single short settle delay avoids
+        // dropping the shortcut during that handoff on current macOS betas.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { [weak self] in
+            self?.performPaste(in: application, text: text)
+        }
+    }
+
+    private func performPaste(in application: NSRunningApplication, text: String?) {
+        #if DEBUG
+        print(
+            "Automatic paste: target=\(application.bundleIdentifier ?? "unknown") " +
+            "postEvent=\(CGPreflightPostEventAccess()) accessibility=\(AXIsProcessTrusted())"
+        )
+        #endif
+
+        // Posting a real Cmd-V preserves the target application's normal paste
+        // behavior and is both faster and less visible than walking its menus.
+        if CGPreflightPostEventAccess() {
+            postPasteShortcut()
+            return
+        }
+
+        if let text,
+           insertTextSilently(text, in: application) {
+            return
+        }
+
+        if AXIsProcessTrusted() {
+            _ = performPasteMenuAction(in: application)
+        }
+    }
+
+    private func insertTextSilently(_ text: String, in application: NSRunningApplication) -> Bool {
+        guard AXIsProcessTrusted() else {
+            return false
+        }
+
+        let applicationElement = AXUIElementCreateApplication(application.processIdentifier)
+        guard let focusedElement = copyAXElementAttribute(kAXFocusedUIElementAttribute as CFString, from: applicationElement),
+              let currentValue = copyAXStringAttribute(kAXValueAttribute as CFString, from: focusedElement),
+              let selectedRange = copyAXCFRangeAttribute(kAXSelectedTextRangeAttribute as CFString, from: focusedElement) else {
+            return false
+        }
+
+        let currentNSString = currentValue as NSString
+        guard selectedRange.location >= 0,
+              selectedRange.length >= 0,
+              selectedRange.location <= currentNSString.length,
+              selectedRange.location + selectedRange.length <= currentNSString.length else {
+            return false
+        }
+
+        let replacementRange = NSRange(location: selectedRange.location, length: selectedRange.length)
+        let updatedValue = currentNSString.replacingCharacters(in: replacementRange, with: text)
+        guard AXUIElementSetAttributeValue(
+            focusedElement,
+            kAXValueAttribute as CFString,
+            updatedValue as CFString
+        ) == .success else {
+            return false
+        }
+
+        var updatedSelectionRange = CFRange(
+            location: selectedRange.location + (text as NSString).length,
+            length: 0
+        )
+        guard let updatedSelection = AXValueCreate(.cfRange, &updatedSelectionRange) else {
+            return true
+        }
+
+        _ = AXUIElementSetAttributeValue(
+            focusedElement,
+            kAXSelectedTextRangeAttribute as CFString,
+            updatedSelection
+        )
+        return true
+    }
+
+    private func performPasteMenuAction(in application: NSRunningApplication) -> Bool {
+        guard AXIsProcessTrusted() else {
+            return false
+        }
+
+        let applicationElement = AXUIElementCreateApplication(application.processIdentifier)
+        guard let menuBar = copyAXElementAttribute(kAXMenuBarAttribute as CFString, from: applicationElement) else {
+            return false
+        }
+
+        if let editMenu = findAXElement(titled: "Edit", in: menuBar) {
+            _ = AXUIElementPerformAction(editMenu, kAXPressAction as CFString)
+            if pressPasteMenuItem(in: editMenu) {
+                return true
+            }
+        }
+
+        return pressPasteMenuItem(in: menuBar)
+    }
+
+    private func pressPasteMenuItem(in element: AXUIElement, depth: Int = 0) -> Bool {
+        guard depth < 8 else {
+            return false
+        }
+
+        if isPasteMenuItem(element),
+           AXUIElementPerformAction(element, kAXPressAction as CFString) == .success {
+            return true
+        }
+
+        for child in copyAXChildren(from: element) {
+            if pressPasteMenuItem(in: child, depth: depth + 1) {
+                return true
+            }
+        }
+
+        return false
+    }
+
+    private func findAXElement(titled title: String, in element: AXUIElement, depth: Int = 0) -> AXUIElement? {
+        guard depth < 4 else {
+            return nil
+        }
+
+        if copyAXStringAttribute(kAXTitleAttribute as CFString, from: element) == title {
+            return element
+        }
+
+        for child in copyAXChildren(from: element) {
+            if let matchingElement = findAXElement(titled: title, in: child, depth: depth + 1) {
+                return matchingElement
+            }
+        }
+
+        return nil
+    }
+
+    private func isPasteMenuItem(_ element: AXUIElement) -> Bool {
+        if copyAXStringAttribute(kAXTitleAttribute as CFString, from: element) == "Paste" {
+            return true
+        }
+
+        guard copyAXStringAttribute(kAXMenuItemCmdCharAttribute as CFString, from: element)?.lowercased() == "v" else {
+            return false
+        }
+
+        return copyAXIntAttribute(kAXMenuItemCmdModifiersAttribute as CFString, from: element) == 0
+    }
+
+    private func copyAXElementAttribute(_ attribute: CFString, from element: AXUIElement) -> AXUIElement? {
+        var value: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(element, attribute, &value) == .success else {
+            return nil
+        }
+
+        return (value as! AXUIElement)
+    }
+
+    private func copyAXChildren(from element: AXUIElement) -> [AXUIElement] {
+        var value: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(element, kAXChildrenAttribute as CFString, &value) == .success,
+              let children = value as? [AXUIElement] else {
+            return []
+        }
+
+        return children
+    }
+
+    private func copyAXStringAttribute(_ attribute: CFString, from element: AXUIElement) -> String? {
+        var value: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(element, attribute, &value) == .success else {
+            return nil
+        }
+
+        return value as? String
+    }
+
+    private func copyAXIntAttribute(_ attribute: CFString, from element: AXUIElement) -> Int? {
+        var value: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(element, attribute, &value) == .success,
+              let number = value as? NSNumber else {
+            return nil
+        }
+
+        return number.intValue
+    }
+
+    private func copyAXCFRangeAttribute(_ attribute: CFString, from element: AXUIElement) -> CFRange? {
+        var value: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(element, attribute, &value) == .success,
+              let value,
+              CFGetTypeID(value) == AXValueGetTypeID() else {
+            return nil
+        }
+
+        let axValue = value as! AXValue
+        guard AXValueGetType(axValue) == .cfRange else {
+            return nil
+        }
+
+        var range = CFRange()
+        guard AXValueGetValue(axValue, .cfRange, &range) else {
+            return nil
+        }
+
+        return range
+    }
+
+    private func postPasteShortcut() {
+        let source = CGEventSource(stateID: .hidSystemState)
+        guard let keyDown = CGEvent(
+            keyboardEventSource: source,
+            virtualKey: 0x09,
+            keyDown: true
+        ), let keyUp = CGEvent(
+            keyboardEventSource: source,
+            virtualKey: 0x09,
+            keyDown: false
+        ) else {
+            return
+        }
+
+        keyDown.flags = .maskCommand
+        keyUp.flags = .maskCommand
+        keyDown.post(tap: .cgSessionEventTap)
+        keyUp.post(tap: .cgSessionEventTap)
+    }
+
+    func requestPasteAutomationAccessForPasting() -> Bool {
+        #if DEBUG
+        print(
+            "Automatic paste permission check: " +
+            "postEvent=\(CGPreflightPostEventAccess()) accessibility=\(AXIsProcessTrusted())"
+        )
+        #endif
+
+        if CGPreflightPostEventAccess() {
+            return true
+        }
+
+        // Accessibility access alone can drive the Edit menu, but it does not
+        // authorize the fast, invisible keyboard-event path on current macOS.
+        // Ask for Post Event access explicitly even when Accessibility is already
+        // granted, then retain AX as a compatibility fallback.
+        if CGRequestPostEventAccess() {
+            return true
+        }
+
+        if AXIsProcessTrusted() {
+            return true
+        }
+
+        let accessibilityOptions = [
+            kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String: true
+        ] as CFDictionary
+        return AXIsProcessTrustedWithOptions(accessibilityOptions)
     }
     
     // Add a public method to clear the clipboard history
@@ -1344,10 +1652,16 @@ class ClipboardAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, O
     
     // Handle app activation changes to adjust window behavior when Spotlight appears
     @objc func handleAppActivationChange(_ notification: Notification) {
-        if let app = notification.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication,
-           let bundleID = app.bundleIdentifier,
+        guard let app = notification.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication else {
+            return
+        }
+
+        if app.processIdentifier != ProcessInfo.processInfo.processIdentifier {
+            pasteTargetApplication = app
+        }
+
+        if let bundleID = app.bundleIdentifier,
            let window = self.floatingWindow {
-           
             if bundleID == "com.apple.Spotlight" {
                 // Lower window level when Spotlight is active
                 window.level = .normal

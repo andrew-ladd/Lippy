@@ -1,6 +1,92 @@
 import Foundation
+import CoreGraphics
 
 enum ClipboardKeyboardNavigation {
+    enum ScrollDirection: Equatable {
+        case up
+        case down
+    }
+
+    enum ScrollEdge: Equatable {
+        case top
+        case bottom
+    }
+
+    enum ScrollIntent: Equatable {
+        case movement(ScrollDirection)
+        case wrap(to: ScrollEdge)
+        case boundary(ScrollEdge)
+
+        fileprivate var fallbackEdge: ScrollEdge {
+            switch self {
+            case .movement(.up):
+                return .top
+            case .movement(.down):
+                return .bottom
+            case let .wrap(edge), let .boundary(edge):
+                return edge
+            }
+        }
+
+        fileprivate var shouldAnimate: Bool {
+            if case .movement = self {
+                return true
+            }
+            return false
+        }
+    }
+
+    enum ScrollDecision: Equatable {
+        case noScroll
+        case scroll(to: ScrollEdge, animated: Bool)
+    }
+
+    /// Chooses the smallest directional scroll needed to reveal a keyboard target.
+    ///
+    /// Frames are expected in the same coordinate space as `visibleTop` and
+    /// `visibleBottom`. Missing frames are normal for lazily measured offscreen
+    /// rows, so the navigation intent provides the fallback alignment.
+    static func scrollDecision(
+        targetFrame: CGRect?,
+        visibleTop: CGFloat,
+        visibleBottom: CGFloat,
+        intent: ScrollIntent,
+        visibilityTolerance: CGFloat = 1
+    ) -> ScrollDecision {
+        switch intent {
+        case let .wrap(edge), let .boundary(edge):
+            return .scroll(to: edge, animated: false)
+        case .movement:
+            break
+        }
+
+        guard
+            let targetFrame,
+            !targetFrame.isNull,
+            !targetFrame.isInfinite
+        else {
+            return .scroll(to: intent.fallbackEdge, animated: intent.shouldAnimate)
+        }
+
+        let tolerance = max(0, visibilityTolerance)
+        let isFullyVisible = targetFrame.minY >= visibleTop - tolerance
+            && targetFrame.maxY <= visibleBottom + tolerance
+        if isFullyVisible {
+            return .noScroll
+        }
+
+        let edge: ScrollEdge
+        if targetFrame.minY < visibleTop - tolerance {
+            edge = .top
+        } else if targetFrame.maxY > visibleBottom + tolerance {
+            edge = .bottom
+        } else {
+            edge = intent.fallbackEdge
+        }
+
+        return .scroll(to: edge, animated: intent.shouldAnimate)
+    }
+
     static func actionItemId(
         hoveredId: UUID?,
         selectedId: UUID?,
