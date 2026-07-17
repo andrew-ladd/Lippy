@@ -7,6 +7,43 @@
 
 import XCTest
 
+func makeUITestApplication() -> XCUIApplication {
+    let app = XCUIApplication()
+    app.launchEnvironment["CLIPPY_UI_TESTING"] = "1"
+    return app
+}
+
+func makeFullStartupAccessibilityPromptApplication() -> XCUIApplication {
+    let app = XCUIApplication()
+    app.launchEnvironment["CLIPPY_FORCE_ACCESSIBILITY_ALERT"] = "1"
+    app.launchArguments = [
+        "-hasLaunchedBefore", "YES",
+        "-hideDockIcon", "YES",
+        "-hideMenuBarIcon", "NO",
+        "-autoUpdateEnabled", "NO",
+        "-startAtLogin", "NO"
+    ]
+    return app
+}
+
+func launchFresh(_ app: XCUIApplication) {
+    terminateRunningClippyInstances()
+    
+    if app.state != .notRunning {
+        app.terminate()
+        XCTAssertTrue(app.wait(for: .notRunning, timeout: 5))
+    }
+    app.launch()
+}
+
+func terminateRunningClippyInstances() {
+    let runningApp = XCUIApplication(bundleIdentifier: "com.andrewladd.Lippy")
+    if runningApp.state != .notRunning {
+        runningApp.terminate()
+        XCTAssertTrue(runningApp.wait(for: .notRunning, timeout: 5))
+    }
+}
+
 final class ClippyUITests: XCTestCase {
 
     override func setUpWithError() throws {
@@ -19,25 +56,29 @@ final class ClippyUITests: XCTestCase {
     }
 
     override func tearDownWithError() throws {
-        // Put teardown code here. This method is called after the invocation of each test method in the class.
+        terminateRunningClippyInstances()
     }
 
     @MainActor
-    func testExample() throws {
-        // UI tests must launch the application that they test.
-        let app = XCUIApplication()
-        app.launch()
+    func testAppLaunchesWithoutAccessibilityPrompt() throws {
+        let app = makeUITestApplication()
+        launchFresh(app)
 
-        // Use XCTAssert and related functions to verify your tests produce the correct results.
+        XCTAssertNotEqual(app.state, .notRunning)
+        XCTAssertFalse(app.alerts["Accessibility Permissions Required"].waitForExistence(timeout: 1))
     }
-
+    
     @MainActor
-    func testLaunchPerformance() throws {
-        if #available(macOS 10.15, iOS 13.0, tvOS 13.0, watchOS 7.0, *) {
-            // This measures how long it takes to launch your application.
-            measure(metrics: [XCTApplicationLaunchMetric()]) {
-                XCUIApplication().launch()
-            }
-        }
+    func testFullStartupShowsAccessibilityPromptAndKeepsRunning() throws {
+        let app = makeFullStartupAccessibilityPromptApplication()
+        launchFresh(app)
+        
+        let accessibilityAlert = app.dialogs.containing(.staticText, identifier: "Accessibility Permissions Required").firstMatch
+        XCTAssertTrue(accessibilityAlert.waitForExistence(timeout: 5))
+        XCTAssertNotEqual(app.state, .notRunning)
+        
+        accessibilityAlert.buttons["Later"].click()
+        XCTAssertNotEqual(app.state, .notRunning)
     }
+
 }

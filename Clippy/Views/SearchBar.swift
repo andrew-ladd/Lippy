@@ -134,41 +134,110 @@ struct GlassCapsuleModifier: ViewModifier {
     }
 }
 
-// Glass modifier for clipboard item cards with hover state
+// Glass modifier for clipboard item cards. The material and shadow remain stable
+// while interaction state is drawn with inexpensive overlays.
 struct GlassItemModifier: ViewModifier {
-    var isHovered: Bool
+    var isPointerHovered: Bool
+    var isKeyboardSelected: Bool
     var cornerRadius: CGFloat = 12
     @Environment(\.colorScheme) private var colorScheme
+
+    init(
+        isPointerHovered: Bool,
+        isKeyboardSelected: Bool = false,
+        cornerRadius: CGFloat = 12
+    ) {
+        self.isPointerHovered = isPointerHovered
+        self.isKeyboardSelected = isKeyboardSelected
+        self.cornerRadius = cornerRadius
+    }
+
+    // Keep pointer-only call sites concise. Keyboard-aware rows should use the
+    // explicit initializer above so selection is not mistaken for hover.
+    init(isHovered: Bool, cornerRadius: CGFloat = 12) {
+        self.init(
+            isPointerHovered: isHovered,
+            isKeyboardSelected: false,
+            cornerRadius: cornerRadius
+        )
+    }
     
     func body(content: Content) -> some View {
         if #available(macOS 26.0, *) {
             content
                 .background(
                     RoundedRectangle(cornerRadius: cornerRadius)
-                        .fill(isHovered ? Color.accentColor.opacity(0.12) : Color.gray.opacity(colorScheme == .dark ? 0.18 : 0.10))
+                        .fill(Color.gray.opacity(colorScheme == .dark ? 0.18 : 0.10))
                 )
-                .glassEffect(.regular.interactive(), in: .rect(cornerRadius: cornerRadius))
+                .glassEffect(.regular, in: .rect(cornerRadius: cornerRadius))
+                .modifier(
+                    ItemInteractionOverlay(
+                        isPointerHovered: isPointerHovered,
+                        isKeyboardSelected: isKeyboardSelected,
+                        cornerRadius: cornerRadius,
+                        baseBorderOpacity: 0
+                    )
+                )
         } else {
             content
                 .background(
                     RoundedRectangle(cornerRadius: cornerRadius)
-                        .fill(isHovered ? Color.accentColor.opacity(0.15) : Color.gray.opacity(colorScheme == .dark ? 0.18 : 0.10))
-                )
-                .overlay(
-                    RoundedRectangle(cornerRadius: cornerRadius)
-                        .strokeBorder(
-                            isHovered
-                            ? Color.accentColor.opacity(0.5)
-                            : Color.gray.opacity(colorScheme == .dark ? 0.25 : 0.20),
-                            lineWidth: 0.5
-                        )
+                        .fill(Color.gray.opacity(colorScheme == .dark ? 0.18 : 0.10))
                 )
                 .shadow(
                     color: Color.black.opacity(colorScheme == .dark ? 0.4 : 0.1),
-                    radius: isHovered ? 6 : 3,
+                    radius: 3,
                     x: 0,
-                    y: isHovered ? 2 : 1
+                    y: 1
+                )
+                .modifier(
+                    ItemInteractionOverlay(
+                        isPointerHovered: isPointerHovered,
+                        isKeyboardSelected: isKeyboardSelected,
+                        cornerRadius: cornerRadius,
+                        baseBorderOpacity: colorScheme == .dark ? 0.25 : 0.20
+                    )
                 )
         }
+    }
+}
+
+private struct ItemInteractionOverlay: ViewModifier {
+    let isPointerHovered: Bool
+    let isKeyboardSelected: Bool
+    let cornerRadius: CGFloat
+    let baseBorderOpacity: Double
+
+    func body(content: Content) -> some View {
+        content
+            .overlay {
+                RoundedRectangle(cornerRadius: cornerRadius)
+                    .strokeBorder(
+                        Color.gray.opacity(baseBorderOpacity),
+                        lineWidth: 0.5
+                    )
+                    .allowsHitTesting(false)
+            }
+            .overlay {
+                RoundedRectangle(cornerRadius: cornerRadius)
+                    .fill(Color.accentColor.opacity(0.15))
+                    .opacity(isPointerHovered ? 1 : 0)
+                    .animation(.easeOut(duration: 0.08), value: isPointerHovered)
+                    .allowsHitTesting(false)
+            }
+            .overlay {
+                RoundedRectangle(cornerRadius: cornerRadius)
+                    .fill(Color.accentColor.opacity(0.10))
+                    .opacity(isKeyboardSelected ? 1 : 0)
+                    .animation(
+                        .interactiveSpring(
+                            response: 0.12,
+                            dampingFraction: 0.9,
+                            blendDuration: 0.06
+                        ),
+                        value: isKeyboardSelected
+                    )
+                    .allowsHitTesting(false)
+            }
     }
 }

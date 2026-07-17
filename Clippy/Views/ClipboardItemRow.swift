@@ -9,20 +9,42 @@ import SwiftUI
 // Optimized ClipboardItemRow with better memory management
 struct ClipboardItemRow: View {
     let item: ClipboardItem
-    let isHovered: Bool
+    let isPointerHovered: Bool
+    let isKeyboardSelected: Bool
     let showFullContent: Bool
     @ObservedObject var clipboardManager: ClipboardManager
     @Environment(\.colorScheme) private var colorScheme
     @State private var isPinHovered = false
     @State private var pinBounce = false
+
+    private var usesCodeStyleRendering: Bool {
+        if item.detectedLanguage != nil {
+            return true
+        }
+
+        if case .url = item.type,
+           let urlString = item.url?.absoluteString.lowercased() {
+            return urlString.contains("github")
+        }
+
+        return false
+    }
     
     var body: some View {
         mainContent
             .padding(.vertical, 7)
             .padding(.horizontal, 8)
-            .modifier(GlassItemModifier(isHovered: isHovered))
-            .scaleEffect(isHovered ? 1.01 : 1.0)
-            .animation(.spring(response: 0.3, dampingFraction: 0.7), value: isHovered)
+            .modifier(
+                GlassItemModifier(
+                    isPointerHovered: isPointerHovered,
+                    isKeyboardSelected: isKeyboardSelected
+                )
+            )
+            .scaleEffect(isPointerHovered && !usesCodeStyleRendering ? 1.01 : 1.0)
+            .animation(
+                usesCodeStyleRendering ? nil : .easeOut(duration: 0.08),
+                value: isPointerHovered
+            )
             .frame(maxWidth: .infinity, alignment: .leading)
             .onDrag {
                 switch item.type {
@@ -83,7 +105,7 @@ struct ClipboardItemRow: View {
             }
             
             // Pin button on hover only with reduced size
-            if isHovered {
+            if isPointerHovered {
                 Button(action: { 
                     // Trigger iOS-style bounce
                     withAnimation(.spring(response: 0.25, dampingFraction: 0.4)) {
@@ -232,6 +254,9 @@ struct ClipboardItemRow: View {
                 .fixedSize(horizontal: false, vertical: true)
                 .padding(8)
                 .modifier(GlassCardModifier(cornerRadius: 8))
+                .transaction { transaction in
+                    transaction.animation = nil
+                }
         } else {
             codeTextView(text: item.text ?? "")
         }
@@ -245,6 +270,9 @@ struct ClipboardItemRow: View {
             .fixedSize(horizontal: false, vertical: true)
             .padding(8)
             .modifier(GlassCardModifier(cornerRadius: 8))
+            .transaction { transaction in
+                transaction.animation = nil
+            }
     }
     
     @ViewBuilder
@@ -258,7 +286,8 @@ struct ClipboardItemRow: View {
                     Text(url.absoluteString)
                         .font(.system(size: 11))
                         .foregroundColor(.secondary)
-                        .lineLimit(1)
+                        .lineLimit(nil)
+                        .fixedSize(horizontal: false, vertical: true)
                 }
             } else {
                 Text(item.preview)

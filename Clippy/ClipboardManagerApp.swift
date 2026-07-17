@@ -58,6 +58,8 @@ class ClipboardAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, O
     private var floatingWindow: NSPanel? // Track the floating window
     private var settingsWindow: NSPanel? // Track the settings window
     private var isShowingFloatingWindow = false
+    private var closingWindowIDs = Set<ObjectIdentifier>()
+    private var pasteTargetApplication: NSRunningApplication?
     
     // Keys for saving window positions
     private let floatingWindowPositionKey = "FloatingWindowPosition"
@@ -72,6 +74,8 @@ class ClipboardAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, O
     }
     
     func applicationDidFinishLaunching(_ notification: Notification) {
+        ProcessInfo.processInfo.disableAutomaticTermination("Clippy runs as a menu bar app")
+        
         // Set app icon programmatically from asset catalog
         if let appIcon = NSImage(named: "AppIcon") {
             NSApp.applicationIconImage = appIcon
@@ -93,7 +97,7 @@ class ClipboardAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, O
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
             // Double-check dock icon setting
             let shouldHideDockIcon = UserDefaults.standard.bool(forKey: "hideDockIcon")
-            if shouldHideDockIcon && NSApp.activationPolicy() != .prohibited {
+            if shouldHideDockIcon && NSApp.activationPolicy() != .accessory {
                 self.updateDockIconVisibility(hidden: true)
             }
             
@@ -102,24 +106,6 @@ class ClipboardAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, O
             if shouldHideMenuBarIcon {
                 self.statusItem?.button?.isHidden = true
                 print("Both dock and menu bar icons are hidden - app is accessible via keyboard shortcut only")
-            }
-        }
-        
-        // Request accessibility permissions
-        let options: NSDictionary = [kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String: true]
-        let accessEnabled = AXIsProcessTrustedWithOptions(options)
-        
-        if !accessEnabled {
-            // Show alert to instruct user to enable permissions
-            let alert = NSAlert()
-            alert.messageText = "Accessibility Permissions Required"
-            alert.informativeText = "Please grant accessibility permissions in System Preferences → Security & Privacy → Privacy → Accessibility to enable keyboard shortcuts."
-            alert.alertStyle = .warning
-            alert.addButton(withTitle: "Open System Preferences")
-            alert.addButton(withTitle: "Later")
-            
-            if alert.runModal() == .alertFirstButtonReturn {
-                NSWorkspace.shared.open(URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility")!)
             }
         }
         
@@ -145,6 +131,13 @@ class ClipboardAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, O
         
         // Always create status bar item regardless of preference, since we're a menu bar app
         setupStatusBarItem()
+
+        NSWorkspace.shared.notificationCenter.addObserver(
+            self,
+            selector: #selector(handleAppActivationChange),
+            name: NSWorkspace.didActivateApplicationNotification,
+            object: nil
+        )
         
         // Set up keyboard shortcut manager with user preferences
         let key = UserDefaults.standard.integer(forKey: "clipboardShortcutKey")
@@ -240,11 +233,52 @@ class ClipboardAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, O
                 name: NSNotification.Name("OnboardingDidComplete"),
                 object: nil
             )
+            NotificationCenter.default.addObserver(
+                forName: NSNotification.Name("OnboardingDidComplete"),
+                object: nil,
+                queue: .main
+            ) { [weak self] _ in
+                self?.scheduleAccessibilityPermissionCheck(delay: 0.5)
+            }
         } else {
+            scheduleAccessibilityPermissionCheck()
+            
             // Normal launch: show floating clipboard window
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
                 self?.showFloatingWindow()
             }
+        }
+    }
+    
+    private func scheduleAccessibilityPermissionCheck(delay: TimeInterval = 0.8) {
+        guard ProcessInfo.processInfo.environment["CLIPPY_UI_TESTING"] != "1" else {
+            return
+        }
+        
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
+            self?.showAccessibilityPermissionAlertIfNeeded()
+        }
+    }
+    
+    private func showAccessibilityPermissionAlertIfNeeded() {
+        let forceAccessibilityAlert = ProcessInfo.processInfo.environment["CLIPPY_FORCE_ACCESSIBILITY_ALERT"] == "1"
+        guard forceAccessibilityAlert || !(AXIsProcessTrusted() || CGPreflightPostEventAccess()) else {
+            return
+        }
+        
+        prepareToShowUserFacingWindow()
+        NSApp.activate(ignoringOtherApps: true)
+        
+        let alert = NSAlert()
+        alert.messageText = "Automatic Paste Permission Required"
+        alert.informativeText = "Please allow Clippy in System Settings → Privacy & Security → Accessibility so it can automatically send ⌘V after you select a clipboard item."
+        alert.alertStyle = .warning
+        alert.addButton(withTitle: "Open System Settings")
+        alert.addButton(withTitle: "Later")
+        
+        if alert.runModal() == .alertFirstButtonReturn,
+           let accessibilitySettingsURL = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility") {
+            NSWorkspace.shared.open(accessibilitySettingsURL)
         }
     }
     
@@ -263,52 +297,29 @@ class ClipboardAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, O
             button.image = NSImage(systemSymbolName: "clipboard", accessibilityDescription: "Clipboard")
             button.image?.size = NSSize(width: 18, height: 18)
             button.image?.isTemplate = true
-            
-            // Set button action for left click - show the clipboard history
-            button.action = #selector(handleStatusItemClick)
-            button.target = self
-            
-            // Configure to respond to right mouse clicks as well
-            button.sendAction(on: [.leftMouseUp, .rightMouseUp])
         }
+
+        statusItem?.menu = makeStatusBarMenu()
     }
     
-    @objc func handleStatusItemClick(_ sender: Any?) {
-        guard let event = NSApp.currentEvent else {
-            // Default to showing floating window if we can't get the event
-            showFloatingWindow()
-            return
-        }
-        
-        print("Status item clicked with event type: \(event.type.rawValue)")
-        
-        if event.type == .rightMouseUp {
-            print("Right click detected, showing menu")
-            
-            // Create the menu on demand
-            let menu = NSMenu()
-            
-            // Add settings item
-            let settingsItem = NSMenuItem(title: "Settings", action: #selector(openSettings), keyEquivalent: "")
-            settingsItem.target = self
-            menu.addItem(settingsItem)
-            
-            menu.addItem(NSMenuItem.separator())
-            
-            // Add quit item
-            let quitItem = NSMenuItem(title: "Quit", action: #selector(quitApp), keyEquivalent: "")
-            quitItem.target = self
-            menu.addItem(quitItem)
-            
-            // Show the menu under the button
-            if let button = statusItem?.button {
-                menu.popUp(positioning: nil, at: NSPoint(x: 0, y: 0), in: button)
-            }
-        } else {
-            // Left click - show the floating window
-            print("Left click detected, showing floating window")
-            showFloatingWindow()
-        }
+    private func makeStatusBarMenu() -> NSMenu {
+        let menu = NSMenu()
+
+        let openClippyItem = NSMenuItem(title: "Open Clippy", action: #selector(showFloatingWindow), keyEquivalent: "")
+        openClippyItem.target = self
+        menu.addItem(openClippyItem)
+
+        let settingsItem = NSMenuItem(title: "Open Settings", action: #selector(openSettings), keyEquivalent: "")
+        settingsItem.target = self
+        menu.addItem(settingsItem)
+
+        menu.addItem(NSMenuItem.separator())
+
+        let quitItem = NSMenuItem(title: "Quit Clippy", action: #selector(quitApp), keyEquivalent: "")
+        quitItem.target = self
+        menu.addItem(quitItem)
+
+        return menu
     }
     
     @objc func showHistory() {
@@ -322,14 +333,14 @@ class ClipboardAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, O
     @objc func openSettings() {
         // Debug print
         print("Opening settings window...")
+        prepareToShowUserFacingWindow()
         
         // If settings window is already open, just redirect to it in its current space
         if let window = settingsWindow, window.isVisible {
             print("Settings window already open, redirecting to it")
             // Ensure the window is visible and active in its current space
             window.makeKeyAndOrderFront(nil)
-            // Activate the app but don't force it to front of other apps
-            NSApp.activate(ignoringOtherApps: false)
+            NSApp.activate(ignoringOtherApps: true)
             return
         }
         
@@ -614,13 +625,20 @@ class ClipboardAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, O
     }
     
     @objc func showFloatingWindow() {
+        rememberPasteTargetApplication()
+        prepareToShowUserFacingWindow()
+        
         // If the window already exists, just bring it to front and return
         if let existingWindow = floatingWindow, !existingWindow.isVisible {
             existingWindow.makeKeyAndOrderFront(nil)
             NSApp.activate(ignoringOtherApps: true)
+            NotificationCenter.default.post(name: .clipboardWindowDidActivate, object: existingWindow)
             return
         } else if let existingWindow = floatingWindow, existingWindow.isVisible {
-            // If window is already visible, just keep it open
+            // Reassert keyboard focus when the activation shortcut is pressed while open.
+            existingWindow.makeKeyAndOrderFront(nil)
+            NSApp.activate(ignoringOtherApps: true)
+            NotificationCenter.default.post(name: .clipboardWindowDidActivate, object: existingWindow)
             return
         }
         
@@ -638,12 +656,16 @@ class ClipboardAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, O
         isShowingFloatingWindow = true
         
         // Create and show floating window with ChatGPT and visionOS-inspired styling
-        let window = NSPanel(
+        let window = EscapeHandlingPanel(
             contentRect: NSRect(x: 0, y: 0, width: 320, height: 400),
             styleMask: [.titled, .closable, .fullSizeContentView, .nonactivatingPanel],
             backing: .buffered,
             defer: false
         )
+        window.onEsc = { [weak self, weak window] in
+            guard let self, let window else { return }
+            self.fadeOutAndCloseWindow(window)
+        }
         
         // When window is closed, set our reference to nil
         window.delegate = self
@@ -675,14 +697,6 @@ class ClipboardAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, O
         
         // Set this window to be not movable by background
         window.isMovableByWindowBackground = false
-        
-        // Add a notification observer for when Spotlight activates or deactivates
-        NotificationCenter.default.addObserver(
-            self,
-            selector: #selector(handleAppActivationChange),
-            name: NSWorkspace.didActivateApplicationNotification,
-            object: nil
-        )
         
         // Make window appear with a nice animation - use popover style for modern feel
         window.animationBehavior = .utilityWindow
@@ -1044,6 +1058,7 @@ class ClipboardAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, O
         // Finally show the window with animation
         window.animator().alphaValue = 1.0
         window.makeKeyAndOrderFront(nil)
+        NotificationCenter.default.post(name: .clipboardWindowDidActivate, object: window)
         
         // Restore previous position if available
         if let savedPosition = UserDefaults.standard.string(forKey: floatingWindowPositionKey) {
@@ -1157,43 +1172,10 @@ class ClipboardAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, O
         
         DispatchQueue.main.async {
             if hidden {
-                // The reliable way to completely hide the dock icon:
-                // First set to accessory (reduces visibility)
+                // Accessory apps are hidden from the Dock but can still present windows.
+                // Avoid .prohibited here; it is for background-only apps and prevents
+                // panels like Settings from appearing reliably.
                 NSApp.setActivationPolicy(.accessory)
-                
-                // Then after a tiny delay, set to prohibited (completely hides)
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
-                    NSApp.setActivationPolicy(.prohibited)
-                    
-                    // Verify the setting took effect
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
-                        // If somehow the activation policy isn't prohibited (which can happen),
-                        // try again with a different approach
-                        if NSApp.activationPolicy() != .prohibited {
-                            print("First attempt to hide dock icon failed, retrying...")
-                            
-                            // Try more aggressively with two-step approach
-                            NSApp.setActivationPolicy(.accessory)
-                            
-                            // Process events to ensure the first change is registered
-                            RunLoop.current.run(until: Date(timeIntervalSinceNow: 0.05))
-                            
-                            NSApp.setActivationPolicy(.prohibited)
-                            
-                            // Force process events to apply the change
-                            NSApp.activate(ignoringOtherApps: false)
-                            let _ = NSApp.windows // Force update window list
-                            
-                            // Schedule another check to make triple sure
-                            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
-                                if NSApp.activationPolicy() != .prohibited && UserDefaults.standard.bool(forKey: "hideDockIcon") {
-                                    print("Third attempt to hide dock icon")
-                                    NSApp.setActivationPolicy(.prohibited)
-                                }
-                            }
-                        }
-                    }
-                }
             } else {
                 // Show the dock icon - set to regular
                 NSApp.setActivationPolicy(.regular)
@@ -1209,6 +1191,14 @@ class ClipboardAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, O
                     }
                 }
             }
+        }
+    }
+    
+    private func prepareToShowUserFacingWindow() {
+        if UserDefaults.standard.bool(forKey: "hideDockIcon") {
+            NSApp.setActivationPolicy(.accessory)
+        } else {
+            NSApp.setActivationPolicy(.regular)
         }
     }
     
@@ -1230,6 +1220,13 @@ class ClipboardAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, O
     }
     
     @objc func fadeOutAndCloseWindow(_ sender: Any) {
+        if !Thread.isMainThread {
+            DispatchQueue.main.async { [weak self] in
+                self?.fadeOutAndCloseWindow(sender)
+            }
+            return
+        }
+
         // Get the window - either from the sender or the active window
         let window: NSWindow?
         if let button = sender as? NSButton {
@@ -1251,6 +1248,12 @@ class ClipboardAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, O
 
         // Save position before closing
         if let window = window {
+            let windowID = ObjectIdentifier(window)
+            guard !closingWindowIDs.contains(windowID) else {
+                return
+            }
+            closingWindowIDs.insert(windowID)
+
             if window == self.settingsWindow {
                 let pos = NSStringFromPoint(window.frame.origin)
                 UserDefaults.standard.set(pos, forKey: settingsWindowPositionKey)
@@ -1267,6 +1270,7 @@ class ClipboardAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, O
                 context.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
                 window.animator().alphaValue = 0
             }, completionHandler: {
+                self.closingWindowIDs.remove(ObjectIdentifier(window))
                 if self.settingsWindow == window {
                     self.settingsWindow = nil
                 } else if self.floatingWindow == window {
@@ -1275,6 +1279,347 @@ class ClipboardAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, O
                 window.close()
             })
         }
+    }
+
+    func closeFloatingWindow() {
+        guard let floatingWindow else { return }
+        fadeOutAndCloseWindow(floatingWindow)
+    }
+
+    func dismissFloatingWindowForPaste(completion: @escaping () -> Void) {
+        if !Thread.isMainThread {
+            DispatchQueue.main.async { [weak self] in
+                self?.dismissFloatingWindowForPaste(completion: completion)
+            }
+            return
+        }
+
+        guard let window = floatingWindow else {
+            restorePasteTargetApplication(completion: completion)
+            return
+        }
+
+        let pos = NSStringFromPoint(window.frame.origin)
+        UserDefaults.standard.set(pos, forKey: floatingWindowPositionKey)
+
+        NSApp.hide(nil)
+
+        NSAnimationContext.runAnimationGroup({ context in
+            context.duration = 0.1
+            context.timingFunction = CAMediaTimingFunction(name: .easeOut)
+            window.animator().alphaValue = 0
+        }, completionHandler: {
+            window.orderOut(nil)
+            window.alphaValue = 0.98
+            self.restorePasteTargetApplication(completion: completion)
+        })
+    }
+
+    private func rememberPasteTargetApplication() {
+        guard let frontmostApplication = NSWorkspace.shared.frontmostApplication,
+              frontmostApplication.processIdentifier != ProcessInfo.processInfo.processIdentifier else {
+            return
+        }
+
+        pasteTargetApplication = frontmostApplication
+    }
+
+    private func restorePasteTargetApplication(completion: @escaping () -> Void) {
+        guard let pasteTargetApplication, !pasteTargetApplication.isTerminated else {
+            completion()
+            return
+        }
+
+        pasteTargetApplication.activate(options: [])
+        completion()
+    }
+
+    func pasteClipboardIntoTargetApplication(text: String?) {
+        guard let pasteTargetApplication,
+              !pasteTargetApplication.isTerminated else {
+            return
+        }
+
+        pasteTargetApplication.activate(options: [])
+        pasteWhenTargetIsActive(
+            pasteTargetApplication,
+            text: text,
+            attemptsRemaining: 20
+        )
+    }
+
+    private func pasteWhenTargetIsActive(
+        _ application: NSRunningApplication,
+        text: String?,
+        attemptsRemaining: Int
+    ) {
+        let targetIsActive = NSWorkspace.shared.frontmostApplication?.processIdentifier == application.processIdentifier
+        if !targetIsActive && attemptsRemaining > 0 {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.01) { [weak self] in
+                self?.pasteWhenTargetIsActive(
+                    application,
+                    text: text,
+                    attemptsRemaining: attemptsRemaining - 1
+                )
+            }
+            return
+        }
+
+        // didActivateApplication can arrive just before the target has restored
+        // its key window/first responder. A single short settle delay avoids
+        // dropping the shortcut during that handoff on current macOS betas.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { [weak self] in
+            self?.performPaste(in: application, text: text)
+        }
+    }
+
+    private func performPaste(in application: NSRunningApplication, text: String?) {
+        #if DEBUG
+        print(
+            "Automatic paste: target=\(application.bundleIdentifier ?? "unknown") " +
+            "postEvent=\(CGPreflightPostEventAccess()) accessibility=\(AXIsProcessTrusted())"
+        )
+        #endif
+
+        // Posting a real Cmd-V preserves the target application's normal paste
+        // behavior and is both faster and less visible than walking its menus.
+        if CGPreflightPostEventAccess() {
+            postPasteShortcut()
+            return
+        }
+
+        if let text,
+           insertTextSilently(text, in: application) {
+            return
+        }
+
+        if AXIsProcessTrusted() {
+            _ = performPasteMenuAction(in: application)
+        }
+    }
+
+    private func insertTextSilently(_ text: String, in application: NSRunningApplication) -> Bool {
+        guard AXIsProcessTrusted() else {
+            return false
+        }
+
+        let applicationElement = AXUIElementCreateApplication(application.processIdentifier)
+        guard let focusedElement = copyAXElementAttribute(kAXFocusedUIElementAttribute as CFString, from: applicationElement),
+              let currentValue = copyAXStringAttribute(kAXValueAttribute as CFString, from: focusedElement),
+              let selectedRange = copyAXCFRangeAttribute(kAXSelectedTextRangeAttribute as CFString, from: focusedElement) else {
+            return false
+        }
+
+        let currentNSString = currentValue as NSString
+        guard selectedRange.location >= 0,
+              selectedRange.length >= 0,
+              selectedRange.location <= currentNSString.length,
+              selectedRange.location + selectedRange.length <= currentNSString.length else {
+            return false
+        }
+
+        let replacementRange = NSRange(location: selectedRange.location, length: selectedRange.length)
+        let updatedValue = currentNSString.replacingCharacters(in: replacementRange, with: text)
+        guard AXUIElementSetAttributeValue(
+            focusedElement,
+            kAXValueAttribute as CFString,
+            updatedValue as CFString
+        ) == .success else {
+            return false
+        }
+
+        var updatedSelectionRange = CFRange(
+            location: selectedRange.location + (text as NSString).length,
+            length: 0
+        )
+        guard let updatedSelection = AXValueCreate(.cfRange, &updatedSelectionRange) else {
+            return true
+        }
+
+        _ = AXUIElementSetAttributeValue(
+            focusedElement,
+            kAXSelectedTextRangeAttribute as CFString,
+            updatedSelection
+        )
+        return true
+    }
+
+    private func performPasteMenuAction(in application: NSRunningApplication) -> Bool {
+        guard AXIsProcessTrusted() else {
+            return false
+        }
+
+        let applicationElement = AXUIElementCreateApplication(application.processIdentifier)
+        guard let menuBar = copyAXElementAttribute(kAXMenuBarAttribute as CFString, from: applicationElement) else {
+            return false
+        }
+
+        if let editMenu = findAXElement(titled: "Edit", in: menuBar) {
+            _ = AXUIElementPerformAction(editMenu, kAXPressAction as CFString)
+            if pressPasteMenuItem(in: editMenu) {
+                return true
+            }
+        }
+
+        return pressPasteMenuItem(in: menuBar)
+    }
+
+    private func pressPasteMenuItem(in element: AXUIElement, depth: Int = 0) -> Bool {
+        guard depth < 8 else {
+            return false
+        }
+
+        if isPasteMenuItem(element),
+           AXUIElementPerformAction(element, kAXPressAction as CFString) == .success {
+            return true
+        }
+
+        for child in copyAXChildren(from: element) {
+            if pressPasteMenuItem(in: child, depth: depth + 1) {
+                return true
+            }
+        }
+
+        return false
+    }
+
+    private func findAXElement(titled title: String, in element: AXUIElement, depth: Int = 0) -> AXUIElement? {
+        guard depth < 4 else {
+            return nil
+        }
+
+        if copyAXStringAttribute(kAXTitleAttribute as CFString, from: element) == title {
+            return element
+        }
+
+        for child in copyAXChildren(from: element) {
+            if let matchingElement = findAXElement(titled: title, in: child, depth: depth + 1) {
+                return matchingElement
+            }
+        }
+
+        return nil
+    }
+
+    private func isPasteMenuItem(_ element: AXUIElement) -> Bool {
+        if copyAXStringAttribute(kAXTitleAttribute as CFString, from: element) == "Paste" {
+            return true
+        }
+
+        guard copyAXStringAttribute(kAXMenuItemCmdCharAttribute as CFString, from: element)?.lowercased() == "v" else {
+            return false
+        }
+
+        return copyAXIntAttribute(kAXMenuItemCmdModifiersAttribute as CFString, from: element) == 0
+    }
+
+    private func copyAXElementAttribute(_ attribute: CFString, from element: AXUIElement) -> AXUIElement? {
+        var value: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(element, attribute, &value) == .success else {
+            return nil
+        }
+
+        return (value as! AXUIElement)
+    }
+
+    private func copyAXChildren(from element: AXUIElement) -> [AXUIElement] {
+        var value: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(element, kAXChildrenAttribute as CFString, &value) == .success,
+              let children = value as? [AXUIElement] else {
+            return []
+        }
+
+        return children
+    }
+
+    private func copyAXStringAttribute(_ attribute: CFString, from element: AXUIElement) -> String? {
+        var value: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(element, attribute, &value) == .success else {
+            return nil
+        }
+
+        return value as? String
+    }
+
+    private func copyAXIntAttribute(_ attribute: CFString, from element: AXUIElement) -> Int? {
+        var value: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(element, attribute, &value) == .success,
+              let number = value as? NSNumber else {
+            return nil
+        }
+
+        return number.intValue
+    }
+
+    private func copyAXCFRangeAttribute(_ attribute: CFString, from element: AXUIElement) -> CFRange? {
+        var value: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(element, attribute, &value) == .success,
+              let value,
+              CFGetTypeID(value) == AXValueGetTypeID() else {
+            return nil
+        }
+
+        let axValue = value as! AXValue
+        guard AXValueGetType(axValue) == .cfRange else {
+            return nil
+        }
+
+        var range = CFRange()
+        guard AXValueGetValue(axValue, .cfRange, &range) else {
+            return nil
+        }
+
+        return range
+    }
+
+    private func postPasteShortcut() {
+        let source = CGEventSource(stateID: .hidSystemState)
+        guard let keyDown = CGEvent(
+            keyboardEventSource: source,
+            virtualKey: 0x09,
+            keyDown: true
+        ), let keyUp = CGEvent(
+            keyboardEventSource: source,
+            virtualKey: 0x09,
+            keyDown: false
+        ) else {
+            return
+        }
+
+        keyDown.flags = .maskCommand
+        keyUp.flags = .maskCommand
+        keyDown.post(tap: .cgSessionEventTap)
+        keyUp.post(tap: .cgSessionEventTap)
+    }
+
+    func requestPasteAutomationAccessForPasting() -> Bool {
+        #if DEBUG
+        print(
+            "Automatic paste permission check: " +
+            "postEvent=\(CGPreflightPostEventAccess()) accessibility=\(AXIsProcessTrusted())"
+        )
+        #endif
+
+        if CGPreflightPostEventAccess() {
+            return true
+        }
+
+        // Accessibility access alone can drive the Edit menu, but it does not
+        // authorize the fast, invisible keyboard-event path on current macOS.
+        // Ask for Post Event access explicitly even when Accessibility is already
+        // granted, then retain AX as a compatibility fallback.
+        if CGRequestPostEventAccess() {
+            return true
+        }
+
+        if AXIsProcessTrusted() {
+            return true
+        }
+
+        let accessibilityOptions = [
+            kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String: true
+        ] as CFDictionary
+        return AXIsProcessTrustedWithOptions(accessibilityOptions)
     }
     
     // Add a public method to clear the clipboard history
@@ -1307,10 +1652,16 @@ class ClipboardAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, O
     
     // Handle app activation changes to adjust window behavior when Spotlight appears
     @objc func handleAppActivationChange(_ notification: Notification) {
-        if let app = notification.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication,
-           let bundleID = app.bundleIdentifier,
+        guard let app = notification.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication else {
+            return
+        }
+
+        if app.processIdentifier != ProcessInfo.processInfo.processIdentifier {
+            pasteTargetApplication = app
+        }
+
+        if let bundleID = app.bundleIdentifier,
            let window = self.floatingWindow {
-           
             if bundleID == "com.apple.Spotlight" {
                 // Lower window level when Spotlight is active
                 window.level = .normal
@@ -1356,7 +1707,37 @@ class ClipboardAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, O
     }
 }
 
-// KeyEventHandlerView for intercepting ESC key events
+final class EscapeHandlingPanel: NSPanel {
+    var onEsc: (() -> Void)?
+
+    override var canBecomeKey: Bool {
+        true
+    }
+
+    override func sendEvent(_ event: NSEvent) {
+        if event.type == .leftMouseDown, (!NSApp.isActive || !isKeyWindow) {
+            NSApp.activate(ignoringOtherApps: true)
+            makeKeyAndOrderFront(nil)
+        }
+
+        guard event.type == .keyDown, event.keyCode == 53 else {
+            super.sendEvent(event)
+            return
+        }
+
+        let keyEvent = ClipboardHistoryKeyEvent(
+            keyCode: event.keyCode,
+            modifierFlags: event.modifierFlags
+        )
+        NotificationCenter.default.post(name: .clipboardHistoryKeyDown, object: keyEvent)
+
+        if !keyEvent.handled {
+            onEsc?()
+        }
+    }
+}
+
+// KeyEventHandlerView for intercepting keyboard navigation events
 class KeyEventHandlerView: NSView {
     var onEsc: (() -> Void)?
     
@@ -1365,11 +1746,28 @@ class KeyEventHandlerView: NSView {
     }
     
     override func keyDown(with event: NSEvent) {
-        if event.keyCode == 53 { // ESC key
-            onEsc?()
-        } else {
-            super.keyDown(with: event)
+        switch event.keyCode {
+        case 36, 48, 49, 53, 76, 125, 126:
+            let keyEvent = ClipboardHistoryKeyEvent(
+                keyCode: event.keyCode,
+                modifierFlags: event.modifierFlags
+            )
+            NotificationCenter.default.post(name: .clipboardHistoryKeyDown, object: keyEvent)
+
+            if keyEvent.handled {
+                return
+            }
+
+            if event.keyCode == 53 { // ESC key
+                onEsc?()
+                return
+            }
+            fallthrough
+        default:
+            break
         }
+
+        super.keyDown(with: event)
     }
 }
 
